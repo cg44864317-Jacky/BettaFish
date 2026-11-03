@@ -1,11 +1,11 @@
 # 抖音 A 股上市公司分析视频监控
 
-每天自动发现抖音上新发布的股票分析视频，识别其中**具体分析 A 股上市公司**的视频（公司可以通过名称、外号、代码、产品或技术被提及），对这些视频连续跟踪 14 天的点赞、评论、转发、收藏，并在出现异常时预警。
+每天自动发现抖音上新发布的股票分析作品（**视频和图文都包括**），识别其中**具体分析 A 股上市公司**的作品（公司可以通过名称、外号、代码、产品或技术被提及），对这些视频连续跟踪 14 天的点赞、评论、转发、收藏，并在出现异常时预警。
 
 ## 每日流程
 
 ```
-三路召回 ─► 去重入库 ─► 粗筛（大模型看标题文案）─► 刷新详情 ─► 语音/画面解析 ─► 精判打标
+三路召回 ─► 去重入库 ─► 粗筛（大模型看标题文案）─► 刷新详情 ─► 内容解析* ─► 精判打标
    │                                                                              │
    │  关键词搜索（MediaCrawler，失败自动切 TikHub）                                  ▼
    │  财经博主池最新作品（TikHub）                                       上市公司分析视频
@@ -15,9 +15,11 @@
 每日跟踪（TikHub 批量详情，50 条/次）─► 每日快照 ─► 视频级 + 公司级预警 ─► 通知
 ```
 
+\* 内容解析：视频做语音识别 + 抽帧文字识别；图文作品直接对每张图片做文字识别（最多 `STOCK_VIDEO_MAX_FRAMES` 张）。
+
 | 环节 | 数据源 | 说明 |
 |---|---|---|
-| 关键词搜索 | MediaCrawler（主）/ TikHub（备） | 只要最近一天发布的视频；`STOCK_VIDEO_DISCOVERY_SOURCE` 可改主数据源 |
+| 关键词搜索 | MediaCrawler（主）/ TikHub（备） | 只要最近一天发布的视频和图文；`STOCK_VIDEO_DISCOVERY_SOURCE` 可改主数据源 |
 | 博主池 | TikHub | MediaCrawler 的博主模式会抓全部历史作品，开销太大，不用 |
 | 每日跟踪 | TikHub | `fetch_multi_video_v2`，每次 50 条、0.05 美元 |
 | 公司知识库 | AKShare + 大模型 | 公司列表、主营介绍；大模型补充外号、产品、技术、品牌 |
@@ -56,7 +58,7 @@ python -m StockVideoMonitor.main add-creator <sec_uid>  # 手动加入博主（�
 
 ### 语音识别与画面文字识别
 
-默认关闭（`none`），只用标题和文案判断。开启后识别率会明显提高，因为很多视频的标题很模糊，公司名只在语音或画面里出现。两者都需要系统安装 `ffmpeg`。
+默认关闭（`none`），只用标题和文案判断。开启后识别率会明显提高，因为很多作品的标题很模糊，公司名只在语音、画面或图片里出现。视频解析需要系统安装 `ffmpeg`；图文作品只用文字识别，不需要 ffmpeg。**图文作品的信息基本都在图片里，建议至少开启画面文字识别。**
 
 | 后端 | 语音 `STOCK_VIDEO_ASR_BACKEND` | 画面 `STOCK_VIDEO_OCR_BACKEND` |
 |---|---|---|
@@ -70,7 +72,7 @@ python -m StockVideoMonitor.main add-creator <sec_uid>  # 手动加入博主（�
 | 表 | 内容 |
 |---|---|
 | `a_share_company` | 知识库。`manual_locked=1` 的公司不会被自动更新覆盖，可人工维护外号、产品、技术 |
-| `douyin_stock_video` | 所有股票相关视频。`stage`：`prefilter_rejected` 粗筛排除 / `analyzed` 已精判 / `failed` 出错；`is_company_analysis=1` 为上市公司分析视频；`tracking_status`：`active` / `expired` / `unavailable` |
+| `douyin_stock_video` | 所有股票相关作品（视频和图文）。`is_image_post=1` 为图文，图片地址在 `image_urls`；`stage`：`prefilter_rejected` 粗筛排除 / `analyzed` 已精判 / `failed` 出错；`is_company_analysis=1` 为上市公司分析视频；`tracking_status`：`active` / `expired` / `unavailable` |
 | `douyin_stock_video_company` | 视频涉及的公司：识别依据 `basis`（name/code/product/technology）、观点 `stance`（bullish/bearish/neutral）、原文证据 |
 | `douyin_stock_video_snapshot` | 每日互动快照 |
 | `douyin_finance_creator` | 财经博主池（自动加入 + 手动加入） |

@@ -211,6 +211,38 @@ def test_parse_aweme_fields():
     assert r.duration_ms == 15000
 
 
+def test_parse_image_post():
+    d = aweme("p1", "茅台年报图解")
+    d["aweme_type"] = 68
+    d["image_post_info"] = {"images": [{"display_image": {"url_list": ["https://img/1.jpg"]}},
+                                       {"url_list": ["https://img/2.jpg"]}, {"url_list": ["https://img/2.jpg"]}]}
+    r = th.parse_aweme(d)
+    assert r.is_image_post and r.image_urls == ["https://img/1.jpg", "https://img/2.jpg"]
+    assert r.video_url is None and r.aweme_url == "https://www.douyin.com/note/p1"
+    d2 = aweme("p2")
+    d2["images"] = [{"url_list": ["https://img/a.jpg"]}]
+    assert th.parse_aweme(d2).image_urls == ["https://img/a.jpg"]
+
+
+def test_analyze_images_ocr(settings, monkeypatch):
+    class FakeReader:
+        def read(self, paths):
+            return "\n".join(p.name for p in paths)
+
+    analyzer = MediaAnalyzer(settings, transcriber=NoopTranscriber(), frame_reader=FakeReader())
+
+    def fake_download(url, dest):
+        if "bad" in url:
+            raise RuntimeError("404")
+        dest.write_bytes(b"x")
+        return dest
+
+    monkeypatch.setattr(analyzer, "download", fake_download)
+    text = analyzer.analyze_images("p1", ["https://img/1.jpg", "https://img/bad.jpg", "https://img/3.jpg"])
+    assert text == "img_000.jpg\nimg_002.jpg"  # 单张失败不影响其他
+    assert not any(Path(settings.STOCK_VIDEO_MEDIA_DIR).iterdir())  # 临时文件已清理
+
+
 def test_tikhub_search_pagination_and_batch(settings, monkeypatch):
     monkeypatch.setattr(th.time, "sleep", lambda *_: None)
     calls = []
@@ -220,7 +252,7 @@ def test_tikhub_search_pagination_and_batch(settings, monkeypatch):
         assert request.headers["Authorization"] == "Bearer test-token"
         if request.url.path == th.SEARCH_PATH:
             body = json.loads(request.content)
-            assert body["sort_type"] == "2" and body["publish_time"] == "1"
+            assert body["sort_type"] == "2" and body["publish_time"] == "1" and body["content_type"] == "0"
             if body["cursor"] == 0:
                 data = {"business_data": [{"data": {"aweme_info": aweme("a1")}}, {"data": {"aweme_info": aweme("a2")}}],
                         "cursor": 10, "has_more": 1, "search_id": "sid"}
@@ -272,12 +304,13 @@ def test_end_to_end_daily_cycle(settings):
     tracking = FakeTracking()
     tracking.data["v1"] = rec("v1", "", ts, likes=800)
     tracking.data["v2"] = rec("v2", "", ts, likes=50, sec_uid="u2")
+    tracking.data["img"] = rec("img", "", ts, likes=300, aweme_type=68)
     llm = FakeLLM()
     clf = TwoStageClassifier(matcher_from_kb(), llm, min_confidence=0.6)
     stats = DailyDiscovery(disc, clf, noop_analyzer(settings), tracking, settings, hot_keywords_fn=lambda n: []).run(day0)
 
-    assert stats.candidates == 3  # 去重后 v1/v2/v3；old 太旧、img 是图文
-    assert (stats.new_videos, stats.finance, stats.flagged) == (3, 2, 1)
+    assert stats.candidates == 4  # 去重后 v1/v2/v3/img；old 太旧被排除
+    assert (stats.new_videos, stats.finance, stats.flagged) == (4, 3, 2)
     with mdb.session_scope() as s:
         v1 = s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == "v1"))
         assert v1.is_tracked and v1.tracking_status == "active"
@@ -290,8 +323,12 @@ def test_end_to_end_daily_cycle(settings):
         assert v3.stage == "prefilter_rejected"
         mention = s.scalar(select(DouyinStockVideoCompany).where(DouyinStockVideoCompany.aweme_id == "v1"))
         assert (mention.stock_code, mention.basis, mention.stance) == ("300750", "product", "bullish")
-        assert s.get(DouyinFinanceCreator, "u1").flagged_video_count == 1
+        assert s.get(DouyinFinanceCreator, "u1").flagged_video_count == 2  # v1 + 同一作者的图文 img
         assert s.scalar(select(DouyinStockVideoSnapshot).where(DouyinStockVideoSnapshot.aweme_id == "v1")).liked_count == 800
+        img = s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == "img"))
+        assert img.is_image_post and img.aweme_type == 68 and img.is_tracked  # 图文作品同样识别并跟踪
+        assert img.aweme_url == "https://www.douyin.com/note/img"
+        assert s.scalar(select(DouyinStockVideoCompany).where(DouyinStockVideoCompany.aweme_id == "img")).stock_code == "600519"
 
     # 同一天再跑：不会重复入库，tracker 跳过当天已拍快照的视频
     stats_again = DailyDiscovery(disc, clf, noop_analyzer(settings), tracking, settings, hot_keywords_fn=lambda n: []).run(day0)
@@ -306,7 +343,7 @@ def test_end_to_end_daily_cycle(settings):
         tracking.data["v1"] = VideoRecord(aweme_id="v1", liked_count=likes, comment_count=10,
                                           share_count=5 + i, collected_count=8 + i)
         t = DailyTracker(tracking, settings).run(day0 + timedelta(days=i))
-        assert t.updated == 1
+        assert t.updated == 2  # v1 + 图文 img
         alerts = engine.evaluate((day0 + timedelta(days=i)).date())
         spikes = [a for a in alerts if a.alert_type == "spike"]
         if i < 4:
@@ -333,7 +370,7 @@ def test_end_to_end_daily_cycle(settings):
 
     # v9 跟踪 14 天后到期
     t_end = DailyTracker(tracking, settings).run(day0 + timedelta(days=5, hours=1) + timedelta(days=15))
-    assert t_end.expired == 1
+    assert t_end.expired == 2  # v9 与 img 都已过 14 天
     with mdb.session_scope() as s:
         assert s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == "v9")).tracking_status == "expired"
 

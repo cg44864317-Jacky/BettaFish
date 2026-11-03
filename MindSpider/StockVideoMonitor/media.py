@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-视频内容解析：下载 → 抽音频 / 抽帧 → 语音识别 / 画面文字识别
+作品内容解析
+- 视频：下载 → 抽音频 / 抽帧 → 语音识别 / 画面文字识别
+- 图文：下载每张图片 → 画面文字识别（不需要 ffmpeg）
 
 语音识别后端（STOCK_VIDEO_ASR_BACKEND）：
 - none     不做语音识别
@@ -184,7 +186,35 @@ class MediaAnalyzer:
             isinstance(self.transcriber, NoopTranscriber) and isinstance(self.frame_reader, NoopFrameReader)
         )
         if self.enabled and not shutil.which("ffmpeg"):
-            raise RuntimeError("语音/画面解析需要 ffmpeg，请先安装（apt install ffmpeg / brew install ffmpeg）")
+            # 图文作品的文字识别不需要 ffmpeg，所以只提示，处理视频时再报错
+            logger.warning("未找到 ffmpeg：视频的语音/画面解析会失败（图文不受影响），请安装 ffmpeg")
+
+    def _workdir(self, aweme_id: str) -> Path:
+        base = Path(self.s.STOCK_VIDEO_MEDIA_DIR)
+        base.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix=f"{aweme_id}_", dir=base))
+
+    def _cleanup(self, work: Path) -> None:
+        if not self.s.STOCK_VIDEO_KEEP_MEDIA:
+            shutil.rmtree(work, ignore_errors=True)
+        else:
+            logger.debug(f"[解析] 保留媒体文件：{work}")
+
+    def analyze_images(self, aweme_id: str, image_urls: List[str]) -> str:
+        """图文作品：下载每张图片做文字识别（最多 STOCK_VIDEO_MAX_FRAMES 张），返回画面文字。"""
+        if isinstance(self.frame_reader, NoopFrameReader) or not image_urls:
+            return ""
+        work = self._workdir(aweme_id)
+        try:
+            paths: List[Path] = []
+            for i, url in enumerate(image_urls[: self.s.STOCK_VIDEO_MAX_FRAMES]):
+                try:
+                    paths.append(self.download(url, work / f"img_{i:03d}.jpg"))
+                except Exception as e:  # 单张失败不影响其他图片
+                    logger.debug(f"[解析] {aweme_id} 第 {i + 1} 张图片下载失败：{e}")
+            return self.frame_reader.read(paths) if paths else ""
+        finally:
+            self._cleanup(work)
 
     def download(self, url: str, dest: Path) -> Path:
         with httpx.stream("GET", url, headers=DOUYIN_HEADERS, follow_redirects=True, timeout=120) as r:
@@ -204,9 +234,9 @@ class MediaAnalyzer:
         """返回 (语音文字, 画面文字)。未启用解析或没有视频地址时返回空字符串。"""
         if not self.enabled or not video_url:
             return "", ""
-        base = Path(self.s.STOCK_VIDEO_MEDIA_DIR)
-        base.mkdir(parents=True, exist_ok=True)
-        work = Path(tempfile.mkdtemp(prefix=f"{aweme_id}_", dir=base))
+        if not shutil.which("ffmpeg"):
+            raise RuntimeError("视频解析需要 ffmpeg，请先安装（apt install ffmpeg / brew install ffmpeg）")
+        work = self._workdir(aweme_id)
         try:
             video = self.download(video_url, work / "video.mp4")
             asr_text = ocr_text = ""
@@ -224,7 +254,4 @@ class MediaAnalyzer:
                 ocr_text = self.frame_reader.read(sorted(frames_dir.glob("*.jpg")))
             return asr_text, ocr_text
         finally:
-            if not self.s.STOCK_VIDEO_KEEP_MEDIA:
-                shutil.rmtree(work, ignore_errors=True)
-            else:
-                logger.debug(f"[解析] 保留媒体文件：{work}")
+            self._cleanup(work)

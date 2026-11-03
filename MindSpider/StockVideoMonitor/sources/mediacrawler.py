@@ -116,7 +116,8 @@ class MediaCrawlerSource(DiscoverySource):
     def read_back(keywords: List[str], since_ms: int) -> Dict[str, List[VideoRecord]]:
         sql = text(
             "SELECT aweme_id, aweme_type, title, `desc`, create_time, user_id, sec_uid, nickname, "
-            "liked_count, comment_count, share_count, collected_count, video_download_url, cover_url, source_keyword "
+            "liked_count, comment_count, share_count, collected_count, video_download_url, note_download_url, "
+            "cover_url, source_keyword "
             "FROM douyin_aweme WHERE add_ts >= :since OR last_modify_ts >= :since"
         )
         engine = get_engine()
@@ -129,6 +130,8 @@ class MediaCrawlerSource(DiscoverySource):
                 if kw not in out:
                     continue
                 desc = row["desc"] or ""
+                # 图文作品的图片地址以英文逗号拼接存在 note_download_url 里
+                images = [u for u in (row["note_download_url"] or "").split(",") if u.startswith("http")]
                 out[kw].append(
                     VideoRecord(
                         aweme_id=str(row["aweme_id"]),
@@ -143,7 +146,8 @@ class MediaCrawlerSource(DiscoverySource):
                         comment_count=_to_int(row["comment_count"]),
                         share_count=_to_int(row["share_count"]),
                         collected_count=_to_int(row["collected_count"]),
-                        video_url=row["video_download_url"] or None,
+                        video_url=None if images else (row["video_download_url"] or None),
+                        image_urls=images,
                         cover_url=row["cover_url"] or None,
                         aweme_type=_to_int(row["aweme_type"]),
                         source="mediacrawler",

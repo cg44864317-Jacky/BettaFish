@@ -4,7 +4,7 @@
 
 表名沿用「平台_类型」规则，InsightEngine 可直接查询：
 - a_share_company              A 股上市公司知识库（名称、简称、产品、技术、品牌）
-- douyin_stock_video           财经相关视频主表（含解析结果、是否重点跟踪）
+- douyin_stock_video           财经相关作品主表，含视频和图文（含解析结果、是否重点跟踪）
 - douyin_stock_video_company   视频与上市公司的关联（识别依据、观点）
 - douyin_stock_video_snapshot  每日互动数据快照
 - douyin_finance_creator       财经博主池
@@ -79,6 +79,9 @@ class DouyinStockVideo(MonitorBase):
     video_url: Mapped[Optional[str]] = mapped_column(Text)
     cover_url: Mapped[Optional[str]] = mapped_column(Text)
     duration_ms: Mapped[Optional[int]] = mapped_column(Integer)
+    aweme_type: Mapped[Optional[int]] = mapped_column(Integer)  # 0 视频；2 / 68 / 150 图文
+    is_image_post: Mapped[bool] = mapped_column(Boolean, default=False)
+    image_urls: Mapped[Optional[str]] = mapped_column(Text)  # JSON 数组，图文作品的图片地址
 
     discovered_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     discovery_source: Mapped[Optional[str]] = mapped_column(String(32))  # tikhub / mediacrawler

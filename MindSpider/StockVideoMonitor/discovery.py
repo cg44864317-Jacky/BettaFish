@@ -3,6 +3,7 @@
 每日发现与识别
 
 三路召回 → 去重入库 → 粗筛 → 刷新详情（拿新鲜的下载地址）→ 语音/画面解析 → 精判打标
+视频和图文作品都处理：视频做语音识别 + 抽帧文字识别，图文直接对每张图片做文字识别。
 被判定为「上市公司分析」的视频进入 14 天跟踪，作者自动加入财经博主池。
 """
 
@@ -27,9 +28,6 @@ from .settings import MonitorSettings, get_settings
 from .sources import DiscoverySource, SourceError, TrackingSource, VideoRecord
 
 
-IMAGE_AWEME_TYPES = {2, 68}  # 抖音图文作品类型
-
-
 @dataclass
 class DiscoveryStats:
     candidates: int = 0
@@ -46,8 +44,6 @@ def merge_records(groups: Dict[str, List[VideoRecord]]) -> Dict[str, VideoRecord
     merged: Dict[str, VideoRecord] = {}
     for channel, records in groups.items():
         for r in records:
-            if r.aweme_type in IMAGE_AWEME_TYPES:  # 只要视频，过滤图文
-                continue
             existing = merged.get(r.aweme_id)
             if existing is None:
                 r.channels = [channel]
@@ -145,7 +141,8 @@ class DailyDiscovery:
                         aweme_id=aid, title=r.title, desc=r.desc, hashtags=dumps(r.hashtags),
                         create_time=r.create_time, author_uid=r.author_uid, sec_uid=r.sec_uid, nickname=r.nickname,
                         follower_count=r.follower_count, aweme_url=r.aweme_url, video_url=r.video_url,
-                        cover_url=r.cover_url, duration_ms=r.duration_ms, discovered_at=now,
+                        cover_url=r.cover_url, duration_ms=r.duration_ms, aweme_type=r.aweme_type,
+                        is_image_post=r.is_image_post, image_urls=dumps(r.image_urls), discovered_at=now,
                         discovery_source=r.source, discovery_channels=dumps(r.channels), stage="new",
                         liked_count=r.liked_count, comment_count=r.comment_count, share_count=r.share_count,
                         collected_count=r.collected_count, is_tracked=False, tracking_status="none", miss_count=0,
@@ -195,9 +192,14 @@ class DailyDiscovery:
         with session_scope() as s:
             row = s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == aid))
             video_url = (fresh.video_url if fresh else None) or row.video_url
+            image_urls = (fresh.image_urls if fresh else None) or loads_list(row.image_urls)
+            is_image = row.is_image_post or bool(fresh and fresh.is_image_post)
         asr_text, ocr_text = "", ""
         try:
-            asr_text, ocr_text = self.analyzer.analyze(aid, video_url)
+            if is_image:
+                asr_text, ocr_text = "", self.analyzer.analyze_images(aid, image_urls)
+            else:
+                asr_text, ocr_text = self.analyzer.analyze(aid, video_url)
         except Exception as e:  # 解析失败不影响用文字判断
             logger.warning(f"[识别] {aid} 语音/画面解析失败，仅用文字判断：{e}")
         result = self.classifier.judge(text, asr_text, ocr_text)
@@ -206,6 +208,8 @@ class DailyDiscovery:
             row = s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == aid))
             if fresh:
                 row.video_url = fresh.video_url or row.video_url
+                if fresh.image_urls:
+                    row.image_urls = dumps(fresh.image_urls)
                 for attr in ("liked_count", "comment_count", "share_count", "collected_count"):
                     if getattr(fresh, attr) is not None:
                         setattr(row, attr, getattr(fresh, attr))

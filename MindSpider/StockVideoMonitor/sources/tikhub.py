@@ -21,7 +21,7 @@ import httpx
 from loguru import logger
 
 from ..settings import MonitorSettings, get_settings
-from .base import DiscoverySource, SourceError, TrackingSource, VideoRecord
+from .base import IMAGE_AWEME_TYPES, DiscoverySource, SourceError, TrackingSource, VideoRecord
 
 SEARCH_PATH = "/api/v1/douyin/search/fetch_video_search_v2"
 USER_POSTS_PATH = "/api/v1/douyin/app/v3/fetch_user_post_videos"
@@ -60,6 +60,8 @@ def parse_aweme(d: Dict[str, Any], source: str = "tikhub") -> Optional[VideoReco
         if name and name not in hashtags:
             hashtags.append(name)
     duration = video.get("duration") or d.get("duration")
+    image_urls = extract_image_urls(d)
+    is_image = bool(image_urls) or _to_int(d.get("aweme_type")) in IMAGE_AWEME_TYPES
     return VideoRecord(
         aweme_id=str(aweme_id),
         desc=d.get("desc") or "",
@@ -74,12 +76,27 @@ def parse_aweme(d: Dict[str, Any], source: str = "tikhub") -> Optional[VideoReco
         comment_count=_to_int(stats.get("comment_count")),
         share_count=_to_int(stats.get("share_count")),
         collected_count=_to_int(stats.get("collect_count")),
-        video_url=_first_url(video.get("play_addr")) or _first_url(video.get("download_addr")),
-        cover_url=_first_url(video.get("cover")) or _first_url(video.get("origin_cover")),
-        duration_ms=_to_int(duration),
+        # 图文作品的 play_addr 通常只是背景音乐轮播，没有解说，不作为视频地址
+        video_url=None if is_image else (_first_url(video.get("play_addr")) or _first_url(video.get("download_addr"))),
+        cover_url=_first_url(video.get("cover")) or _first_url(video.get("origin_cover")) or (image_urls[0] if image_urls else None),
+        duration_ms=None if is_image else _to_int(duration),
         aweme_type=_to_int(d.get("aweme_type")),
+        image_urls=image_urls,
         source=source,
     )
+
+
+def extract_image_urls(d: Dict[str, Any]) -> List[str]:
+    """图文作品的图片：兼容 images[] 与 image_post_info.images[] 两种结构，每张取一个地址。"""
+    images = d.get("images") or (d.get("image_post_info") or {}).get("images") or []
+    urls: List[str] = []
+    for img in images:
+        if not isinstance(img, dict):
+            continue
+        url = _first_url(img.get("display_image")) or _first_url(img) or (img.get("download_url_list") or [None])[0]
+        if url and url not in urls:
+            urls.append(url)
+    return urls
 
 
 def iter_awemes(payload: Any) -> Iterator[Dict[str, Any]]:
@@ -174,7 +191,7 @@ class TikHubClient:
                     "sort_type": "2",  # 最新发布
                     "publish_time": "1",  # 最近一天
                     "filter_duration": "0",
-                    "content_type": "1",  # 只要视频
+                    "content_type": "0",  # 视频和图文都要
                     "search_id": search_id,
                     "backtrace": backtrace,
                 },

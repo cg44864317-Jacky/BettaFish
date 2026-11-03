@@ -7,6 +7,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional
 
+IMAGE_AWEME_TYPES = {2, 68, 150}  # 抖音图文作品类型
+
 
 @dataclass
 class VideoRecord:
@@ -27,12 +29,18 @@ class VideoRecord:
     cover_url: Optional[str] = None
     duration_ms: Optional[int] = None
     aweme_type: Optional[int] = None  # 0 视频，68 图文等
+    image_urls: List[str] = field(default_factory=list)  # 图文作品的图片地址
     source: str = ""
     channels: List[str] = field(default_factory=list)  # 被哪些召回路径找到
 
     @property
+    def is_image_post(self) -> bool:
+        return self.aweme_type in IMAGE_AWEME_TYPES or bool(self.image_urls)
+
+    @property
     def aweme_url(self) -> str:
-        return f"https://www.douyin.com/video/{self.aweme_id}"
+        kind = "note" if self.is_image_post else "video"
+        return f"https://www.douyin.com/{kind}/{self.aweme_id}"
 
     @property
     def text(self) -> str:
