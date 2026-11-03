@@ -106,6 +106,15 @@ async def main() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+    # 抖音 A 股上市公司分析视频监控模块的表（独立的 MonitorBase，无外键依赖）
+    try:
+        from StockVideoMonitor.models import MonitorBase
+
+        async with engine.begin() as conn:
+            await conn.run_sync(MonitorBase.metadata.create_all)
+    except ImportError as e:
+        logger.warning(f"[init_database_sa] 跳过视频监控模块建表：{e}")
+
     # 保持原有视图创建和释放逻辑
     dialect_name = engine.url.get_backend_name()
     await _create_views_if_needed(dialect_name)
