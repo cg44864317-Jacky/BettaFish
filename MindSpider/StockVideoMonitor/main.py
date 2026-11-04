@@ -10,6 +10,7 @@
     python -m StockVideoMonitor.main alerts                  # 只重新计算今日预警
     python -m StockVideoMonitor.main add-creator <sec_uid>   # 手动把博主加入博主池
     python -m StockVideoMonitor.main status                  # 查看监控概况
+    python -m StockVideoMonitor.main selftest                # 部署自检
 """
 
 from __future__ import annotations
@@ -85,6 +86,12 @@ def cmd_add_creator(args) -> None:
             logger.info(f"已加入博主池：{uid}")
 
 
+def cmd_selftest(args) -> None:
+    from .selftest import run_selftest
+
+    raise SystemExit(0 if run_selftest(include_tikhub=not args.no_tikhub) else 1)
+
+
 def cmd_status(_args) -> None:
     with session_scope() as s:
         kb = s.scalar(select(func.count()).select_from(AShareCompany))
@@ -138,6 +145,9 @@ def main() -> None:
     ac.add_argument("sec_uids", nargs="+")
     ac.set_defaults(func=cmd_add_creator)
     sub.add_parser("status", help="查看监控概况").set_defaults(func=cmd_status)
+    st = sub.add_parser("selftest", help="部署自检：数据库、大模型、TikHub、AKShare、内容解析")
+    st.add_argument("--no-tikhub", action="store_true", help="跳过 TikHub 检查（避免产生费用）")
+    st.set_defaults(func=cmd_selftest)
     sch = sub.add_parser("schedule", help="常驻进程，每天定时执行")
     sch.add_argument("--at", default="07:30", help="每天执行时间，默认 07:30（开盘前）")
     sch.set_defaults(func=cmd_schedule)
