@@ -33,6 +33,7 @@ GENERIC_TERMS = {
     "医药", "药品", "手机", "电脑", "光伏", "储能", "钢材", "水泥", "地产", "物业", "物流", "能源", "电力",
     "数据", "云计算", "人工智能", "AI", "大模型", "机器人", "半导体", "新能源", "互联网", "游戏", "电商",
     "中国", "集团", "股份", "科技", "控股", "实业", "发展", "产品", "技术", "其他", "主营业务",
+    "龙头", "龙头股", "牛股", "妖股", "白马", "蓝筹", "概念股", "板块",
 }
 # 公司简称本身就是日常用语，只作为弱候选（大模型扩充时还会补充 ambiguous_terms）
 COMMON_WORD_NAMES = {"值得买", "农产品", "中国长城", "长城", "天马", "宝安", "中集", "特发", "华强", "天健", "沙河", "赛格"}
@@ -87,7 +88,9 @@ class CompanyMatcher:
         ambiguous: Dict[str, Set[str]] = {}
         for c in companies:
             self.names[c.stock_code] = c.name
-            amb = {normalize(x) for x in loads_list(getattr(c, "ambiguous_terms", None))} | COMMON_WORD_NAMES
+            # 大模型偶尔把公司自己的正式简称标为日常用语（如 比亚迪、盐田港），≥3 字的正式简称不采纳；内置的日常用语名单仍然生效
+            own_official = {v for v in name_variants(c.name) if len(v) >= 3}
+            amb = ({normalize(x) for x in loads_list(getattr(c, "ambiguous_terms", None))} - own_official) | COMMON_WORD_NAMES
             ambiguous[c.stock_code] = amb
             for v in name_variants(c.name):
                 entries.append((v, c.stock_code, "name"))
@@ -235,7 +238,7 @@ def sync_company_list(fetch_business: bool = True, sleep: float = 0.3, only_miss
 
 ENRICH_SYSTEM = """你是 A 股上市公司研究员。给定一批公司的代码、简称和主营业务，为每家公司补充以下信息，用于在短视频文字中识别该公司：
 - aliases：投资者常用的叫法、外号、旧称（如 宁德时代→宁王；贵州茅台→茅台）。不要写纯地名。
-- products：有辨识度的具体产品、型号或系列名称（如 飞天茅台、麒麟电池、元宝、泊寓）。
+- products：有辨识度的具体产品、型号或系列名称（如 飞天茅台、麒麟电池、萤石、泊寓）。
   不要写业务板块或品类名称，如「商品住宅」「高速公路」「房产销售」「显示屏」「药品」「租赁业务」。
 - technologies：有辨识度的核心技术、平台或工艺名称（如 CTP、刀片电池、DM-i）。
 - brands：旗下知名品牌。
@@ -243,6 +246,50 @@ ENRICH_SYSTEM = """你是 A 股上市公司研究员。给定一批公司的代�
   （如 值得买、农产品、长城、宝安）。没有就留空。
 要求：只写能指向这家公司的具体名称，不写「电池」「芯片」「白酒」这类行业通用词；不确定就留空；每类最多 8 个。
 只输出 JSON：{"companies":[{"code":"600519","aliases":[],"products":[],"technologies":[],"brands":[],"ambiguous_terms":[]}]}"""
+
+
+# 提示词示例里出现的词，只允许留在对应的公司上（大模型偶尔会把示例错配给别的公司，如把「宁王」写给贵州茅台）
+EXAMPLE_TERM_OWNERS = {
+    "宁王": "300750", "CATL": "300750", "麒麟电池": "300750", "神行电池": "300750", "CTP": "300750",
+    "茅台": "600519", "飞天茅台": "600519", "刀片电池": "002594", "DM-I": "002594", "萤石": "002415",
+    "泊寓": "000002", "值得买": "300785", "什么值得买": "300785", "农产品": "000061",
+}
+
+
+def cleanup_knowledge_base() -> int:
+    """
+    扩充后的清理，返回改动的公司数：
+    - 提示词示例词只保留在正确的公司上
+    - 一家公司的正式简称不能出现在其他公司的外号/产品/技术/品牌里（如「平安银行」不应挂在中国平安名下）
+    人工维护（manual_locked）的公司不改动。
+    """
+    with session_scope() as s:
+        companies = list(s.scalars(select(AShareCompany)))
+        official: Dict[str, str] = {}
+        for c in companies:
+            for v in name_variants(c.name):
+                if len(v) >= 2:
+                    official.setdefault(v, c.stock_code)
+        changed = 0
+        for c in companies:
+            if c.manual_locked:
+                continue
+            dirty = False
+            for attr in ("aliases", "products", "technologies", "brands"):
+                values = loads_list(getattr(c, attr))
+                kept = []
+                for v in values:
+                    n = normalize(str(v))
+                    owner = EXAMPLE_TERM_OWNERS.get(n) or official.get(n)
+                    if owner and owner != c.stock_code:
+                        continue
+                    kept.append(v)
+                if kept != values:
+                    setattr(c, attr, dumps(kept))
+                    dirty = True
+            changed += dirty
+    logger.info(f"[知识库] 清理完成，修正 {changed} 家公司的外号/产品/品牌")
+    return changed
 
 
 def enrich_with_llm(llm: JSONLLM, batch_size: int = 15, limit: Optional[int] = None, refresh: bool = False) -> int:

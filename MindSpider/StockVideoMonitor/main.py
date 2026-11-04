@@ -34,7 +34,7 @@ def cmd_init_db(_args) -> None:
 
 
 def cmd_build_kb(args) -> None:
-    from .knowledge_base import enrich_with_llm, sync_company_list
+    from .knowledge_base import cleanup_knowledge_base, enrich_with_llm, sync_company_list
     from .llm import OpenAICompatLLM
 
     create_tables()
@@ -43,6 +43,7 @@ def cmd_build_kb(args) -> None:
     if not args.skip_llm:
         n = enrich_with_llm(OpenAICompatLLM(), limit=args.enrich_limit, refresh=args.refresh_llm)
         logger.info(f"[知识库] 大模型扩充完成 {n} 家")
+    cleanup_knowledge_base()
 
 
 def cmd_run(args) -> None:

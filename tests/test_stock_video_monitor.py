@@ -220,6 +220,36 @@ def test_enrich_replaces_products_and_records_ambiguous(settings):
         assert json.loads(c.ambiguous_terms) == ["盐田"] and c.enriched_at is not None
 
 
+def test_cleanup_removes_leaked_and_foreign_official_names(settings):
+    from StockVideoMonitor.knowledge_base import cleanup_knowledge_base
+
+    with mdb.session_scope() as s:
+        s.add(AShareCompany(stock_code="300750", name="宁德时代", aliases=dumps(["宁王"]), manual_locked=False))
+        s.add(AShareCompany(stock_code="600519", name="贵州茅台", aliases=dumps(["茅台", "宁王"]),
+                            products=dumps(["飞天茅台", "刀片电池"]), manual_locked=False))
+        s.add(AShareCompany(stock_code="000001", name="平安银行", manual_locked=False))
+        s.add(AShareCompany(stock_code="601318", name="中国平安", aliases=dumps(["平安"]),
+                            brands=dumps(["平安银行", "平安好医生"]), manual_locked=False))
+        s.add(AShareCompany(stock_code="002594", name="比亚迪", aliases=dumps(["宁王"]), manual_locked=True))
+    assert cleanup_knowledge_base() == 2
+    with mdb.session_scope() as s:
+        assert json.loads(s.get(AShareCompany, "600519").aliases) == ["茅台"]
+        assert json.loads(s.get(AShareCompany, "600519").products) == ["飞天茅台"]
+        assert json.loads(s.get(AShareCompany, "601318").brands) == ["平安好医生"]
+        assert json.loads(s.get(AShareCompany, "300750").aliases) == ["宁王"]
+        assert json.loads(s.get(AShareCompany, "002594").aliases) == ["宁王"]  # 人工维护的不动
+
+
+def test_own_official_name_not_ambiguous(settings):
+    with mdb.session_scope() as s:
+        s.add(AShareCompany(stock_code="002594", name="比亚迪", ambiguous_terms=dumps(["比亚迪"]),
+                            enriched_at=datetime(2026, 11, 1), manual_locked=False))
+        s.add(AShareCompany(stock_code="600630", name="龙头股份", aliases=dumps(["龙头"]), manual_locked=False))
+    m = matcher_from_kb()
+    assert m.match("比亚迪销量创新高")["002594"].strong
+    assert "600630" not in m.match("券商龙头")  # 「龙头」是通用词
+
+
 def test_classifier_drops_unknown_and_applies_threshold(settings):
     seed_kb()
     clf = TwoStageClassifier(matcher_from_kb(), FakeLLM(), min_confidence=0.6)
