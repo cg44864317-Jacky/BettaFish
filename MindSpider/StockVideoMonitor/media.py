@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
@@ -33,6 +34,15 @@ DOUYIN_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     "Referer": "https://www.douyin.com/",
 }
+
+
+def split_command(template: str, input_path: Path) -> List[str]:
+    """把命令模板拆成参数列表并填入文件路径。Windows 下不按 POSIX 规则处理反斜杠，保留 C:\\ 这类路径。"""
+    if os.name == "nt":
+        parts = [p[1:-1] if len(p) >= 2 and p[0] == p[-1] == '"' else p for p in shlex.split(template, posix=False)]
+    else:
+        parts = shlex.split(template)
+    return [part.replace("{input}", str(input_path)) for part in parts]
 
 
 class Transcriber(Protocol):
@@ -56,7 +66,7 @@ class CommandTranscriber:
         self.template, self.timeout = template, timeout
 
     def transcribe(self, audio_path: Path) -> str:
-        cmd = [part.replace("{input}", str(audio_path)) for part in shlex.split(self.template)]
+        cmd = split_command(self.template, audio_path)
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout)
         if r.returncode != 0:
             raise RuntimeError(f"语音识别命令失败（{r.returncode}）：{r.stderr[-300:]}")
@@ -124,7 +134,7 @@ class CommandFrameReader:
     def read(self, image_paths: List[Path]) -> str:
         lines: List[str] = []
         for p in image_paths:
-            cmd = [part.replace("{input}", str(p)) for part in shlex.split(self.template)]
+            cmd = split_command(self.template, p)
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if r.returncode == 0:
                 lines.extend(r.stdout.splitlines())

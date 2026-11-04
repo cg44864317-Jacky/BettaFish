@@ -19,6 +19,7 @@ from StockVideoMonitor.classifier import TwoStageClassifier  # noqa: E402
 from StockVideoMonitor.discovery import DailyDiscovery  # noqa: E402
 from StockVideoMonitor.knowledge_base import CompanyMatcher, name_variants  # noqa: E402
 from StockVideoMonitor.llm import extract_json  # noqa: E402
+from StockVideoMonitor import media as media_mod  # noqa: E402
 from StockVideoMonitor.media import MediaAnalyzer, NoopFrameReader, NoopTranscriber  # noqa: E402
 from StockVideoMonitor.models import (  # noqa: E402
     AShareCompany, DouyinFinanceCreator, DouyinStockVideo, DouyinStockVideoCompany, DouyinStockVideoSnapshot,
@@ -406,3 +407,11 @@ def test_company_alerts_from_db(settings):
     AlertEngine.save(alerts)
     with mdb.session_scope() as s:
         assert len(list(s.scalars(select(StockVideoAlert)))) == len(alerts)
+
+
+def test_split_command_windows_paths(monkeypatch):
+    monkeypatch.setattr(media_mod.os, "name", "nt")
+    cmd = media_mod.split_command(r'"C:\Program Files\analyzer\analyzer.exe" transcribe {input}', Path("a.wav"))
+    assert cmd == [r"C:\Program Files\analyzer\analyzer.exe", "transcribe", "a.wav"]
+    monkeypatch.setattr(media_mod.os, "name", "posix")
+    assert media_mod.split_command("analyzer --in '{input}'", Path("b.wav")) == ["analyzer", "--in", "b.wav"]

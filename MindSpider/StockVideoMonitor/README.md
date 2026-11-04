@@ -42,6 +42,8 @@ python -m StockVideoMonitor.main run
 # 3. 每天定时执行（推荐用 cron，以下二选一）
 #    crontab:  30 7 * * *  cd /path/to/BettaFish/MindSpider && python -m StockVideoMonitor.main run >> logs/stock_video.log 2>&1
 python -m StockVideoMonitor.main schedule --at 07:30
+#    Windows 任务计划程序（在「命令提示符」里执行一次即可，路径和 Python 按实际修改）：
+#    schtasks /Create /SC DAILY /ST 07:30 /TN BettaFishStockVideo /TR "cmd /c cd /d C:\BettaFish\MindSpider && C:\path\to\python.exe -m StockVideoMonitor.main run >> ..\logs\stock_video.log 2>&1"
 
 # 其他
 python -m StockVideoMonitor.main status                 # 概况
