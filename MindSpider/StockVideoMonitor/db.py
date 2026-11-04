@@ -56,7 +56,21 @@ def session_scope() -> Iterator[Session]:
         session.close()
 
 
+# 已有表新增的列（create_all 不会给已存在的表加列），按需补上
+_ADDED_COLUMNS = {"a_share_company": {"ambiguous_terms": "TEXT"}}
+
+
 def create_tables(engine: Optional[Engine] = None) -> None:
+    from sqlalchemy import inspect, text
+
     from .models import MonitorBase
 
-    MonitorBase.metadata.create_all(engine or get_engine())
+    engine = engine or get_engine()
+    MonitorBase.metadata.create_all(engine)
+    insp = inspect(engine)
+    for table, cols in _ADDED_COLUMNS.items():
+        existing = {c["name"] for c in insp.get_columns(table)}
+        for col, ddl in cols.items():
+            if col not in existing:
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))

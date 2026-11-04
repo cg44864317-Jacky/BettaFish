@@ -53,6 +53,7 @@ class AShareCompany(MonitorBase):
     products: Mapped[Optional[str]] = mapped_column(Text)  # JSON 数组：主要产品
     technologies: Mapped[Optional[str]] = mapped_column(Text)  # JSON 数组：核心技术
     brands: Mapped[Optional[str]] = mapped_column(Text)  # JSON 数组：品牌
+    ambiguous_terms: Mapped[Optional[str]] = mapped_column(Text)  # JSON 数组：属于日常用语、只作弱候选的名称/外号
     manual_locked: Mapped[bool] = mapped_column(Boolean, default=False)  # 人工维护过，自动更新不覆盖别名
     enriched_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime)

@@ -34,6 +34,8 @@ GENERIC_TERMS = {
     "数据", "云计算", "人工智能", "AI", "大模型", "机器人", "半导体", "新能源", "互联网", "游戏", "电商",
     "中国", "集团", "股份", "科技", "控股", "实业", "发展", "产品", "技术", "其他", "主营业务",
 }
+# 公司简称本身就是日常用语，只作为弱候选（大模型扩充时还会补充 ambiguous_terms）
+COMMON_WORD_NAMES = {"值得买", "农产品", "中国长城", "长城", "天马", "宝安", "中集", "特发", "华强", "天健", "沙河", "赛格"}
 CODE_RE = re.compile(r"(?<!\d)((?:60|68|00|30)\d{4}|(?:8|4)\d{5}|920\d{3})(?!\d)")
 
 
@@ -68,29 +70,46 @@ class CompanyHit:
     name: str
     bases: Set[str] = field(default_factory=set)  # name / product / technology / brand / code
     terms: Set[str] = field(default_factory=set)
+    strong: bool = False  # 是否有「强」命中：股票代码，或不会与日常用语混淆的名称/外号
 
 
 class CompanyMatcher:
+    """
+    强词：股票代码、≥3 个字且只属于一家公司、且未被标为日常用语的名称/外号。
+    弱词：其余名称/外号，以及产品、技术、品牌。弱词只作为候选交给大模型判断，
+          不会单独把视频判为股票相关（避免「值得买」「农产品」「高速公路」这类误报）。
+    产品/技术/品牌只取大模型扩充或人工维护过的公司，AKShare 的业务板块名称不参与匹配。
+    """
+
     def __init__(self, companies: Iterable[AShareCompany]):
         self.names: Dict[str, str] = {}
-        self._trie: dict = {}
+        entries: List[Tuple[str, str, str]] = []  # (term, code, basis)
+        ambiguous: Dict[str, Set[str]] = {}
         for c in companies:
             self.names[c.stock_code] = c.name
+            amb = {normalize(x) for x in loads_list(getattr(c, "ambiguous_terms", None))} | COMMON_WORD_NAMES
+            ambiguous[c.stock_code] = amb
             for v in name_variants(c.name):
-                self._add(v, c.stock_code, "name")
+                entries.append((v, c.stock_code, "name"))
             for alias in loads_list(c.aliases):
-                self._add(normalize(alias), c.stock_code, "name", min_len=2)
-            for basis, values in (("product", c.products), ("technology", c.technologies), ("brand", c.brands)):
-                for v in loads_list(values):
-                    self._add(normalize(v), c.stock_code, basis, min_len=2 if c.manual_locked else 3)
-
-    def _add(self, term: str, code: str, basis: str, min_len: int = 2) -> None:
-        if len(term) < min_len or term in GENERIC_TERMS:
-            return
-        node = self._trie
-        for ch in term:
-            node = node.setdefault(ch, {})
-        node.setdefault("$", set()).add((code, basis, term))
+                entries.append((normalize(alias), c.stock_code, "name"))
+            if c.enriched_at or c.manual_locked:
+                for basis, values in (("product", c.products), ("technology", c.technologies), ("brand", c.brands)):
+                    for v in loads_list(values):
+                        entries.append((normalize(v), c.stock_code, basis))
+        owners: Dict[str, Set[str]] = {}
+        for term, code, _ in entries:
+            owners.setdefault(term, set()).add(code)
+        self._trie: dict = {}
+        for term, code, basis in entries:
+            if len(term) < 2 or term in GENERIC_TERMS:
+                continue
+            strong = (basis == "name" and len(term) >= 3 and len(owners[term]) == 1
+                      and term not in ambiguous.get(code, set()))
+            node = self._trie
+            for ch in term:
+                node = node.setdefault(ch, {})
+            node.setdefault("$", set()).add((code, basis, term, strong))
 
     def __len__(self) -> int:
         return len(self.names)
@@ -104,15 +123,17 @@ class CompanyMatcher:
             while j < len(t) and t[j] in node:
                 node = node[t[j]]
                 j += 1
-                for code, basis, term in node.get("$", ()):
+                for code, basis, term, strong in node.get("$", ()):
                     h = hits.setdefault(code, CompanyHit(code, self.names[code]))
                     h.bases.add(basis)
                     h.terms.add(term)
+                    h.strong = h.strong or strong
         for code in CODE_RE.findall(t):
             if code in self.names:
                 h = hits.setdefault(code, CompanyHit(code, self.names[code]))
                 h.bases.add("code")
                 h.terms.add(code)
+                h.strong = True
         return hits
 
     def resolve(self, code: Optional[str], name: Optional[str]) -> Optional[Tuple[str, str]]:
@@ -203,9 +224,9 @@ def sync_company_list(fetch_business: bool = True, sleep: float = 0.3, only_miss
             continue
         with session_scope() as s:
             row = s.get(AShareCompany, c.stock_code)
-            row.main_business = business
-            if not row.manual_locked and products:
-                row.products = dumps(list(dict.fromkeys(loads_list(row.products) + products)))
+            # 业务板块名称（如「高速公路」「房产销售」）太泛，只作为大模型扩充的背景材料，不进入匹配用的 products
+            row.main_business = business + (f"（产品与业务：{'、'.join(products)}）" if products else "") if business else (
+                f"产品与业务：{'、'.join(products)}" if products else None)
         if i % 200 == 0:
             logger.info(f"[知识库] 主营介绍进度 {i}/{len(todo)}")
         time.sleep(sleep)
@@ -213,12 +234,15 @@ def sync_company_list(fetch_business: bool = True, sleep: float = 0.3, only_miss
 
 
 ENRICH_SYSTEM = """你是 A 股上市公司研究员。给定一批公司的代码、简称和主营业务，为每家公司补充以下信息，用于在短视频文字中识别该公司：
-- aliases：投资者常用的叫法、外号、旧称（如 宁德时代→宁王；贵州茅台→茅台）。
-- products：有辨识度的主要产品或业务名称（如 飞天茅台、麒麟电池、元宝）。
-- technologies：有辨识度的核心技术、平台或工艺名称（如 CTP、刀片电池）。
+- aliases：投资者常用的叫法、外号、旧称（如 宁德时代→宁王；贵州茅台→茅台）。不要写纯地名。
+- products：有辨识度的具体产品、型号或系列名称（如 飞天茅台、麒麟电池、元宝、泊寓）。
+  不要写业务板块或品类名称，如「商品住宅」「高速公路」「房产销售」「显示屏」「药品」「租赁业务」。
+- technologies：有辨识度的核心技术、平台或工艺名称（如 CTP、刀片电池、DM-i）。
 - brands：旗下知名品牌。
+- ambiguous_terms：该公司的简称或上面列出的外号中，属于日常用语、地名或常见词、容易在与股票无关的内容里出现的词
+  （如 值得买、农产品、长城、宝安）。没有就留空。
 要求：只写能指向这家公司的具体名称，不写「电池」「芯片」「白酒」这类行业通用词；不确定就留空；每类最多 8 个。
-只输出 JSON：{"companies":[{"code":"600519","aliases":[],"products":[],"technologies":[],"brands":[]}]}"""
+只输出 JSON：{"companies":[{"code":"600519","aliases":[],"products":[],"technologies":[],"brands":[],"ambiguous_terms":[]}]}"""
 
 
 def enrich_with_llm(llm: JSONLLM, batch_size: int = 15, limit: Optional[int] = None, refresh: bool = False) -> int:
@@ -233,7 +257,9 @@ def enrich_with_llm(llm: JSONLLM, batch_size: int = 15, limit: Optional[int] = N
     for i in range(0, len(todo), batch_size):
         batch = todo[i : i + batch_size]
         lines = [
-            f"{c.stock_code} {c.name}：{(c.main_business or '')[:120]}；已知产品：{'、'.join(loads_list(c.products)[:10])}"
+            f"{c.stock_code} {c.name}：{(c.main_business or '')[:300]}"
+            + ("" if "产品与业务" in (c.main_business or "") or not loads_list(c.products)
+               else f"（产品与业务：{'、'.join(loads_list(c.products)[:12])}）")
             for c in batch
         ]
         try:
@@ -248,9 +274,11 @@ def enrich_with_llm(llm: JSONLLM, batch_size: int = 15, limit: Optional[int] = N
                 if not x:
                     continue
                 row = s.get(AShareCompany, c.stock_code)
-                for attr in ("aliases", "products", "technologies", "brands"):
-                    merged = loads_list(getattr(row, attr)) + [str(v).strip() for v in x.get(attr, []) if str(v).strip()]
-                    setattr(row, attr, dumps(list(dict.fromkeys(merged))))
+                clean = lambda key: list(dict.fromkeys(str(v).strip() for v in (x.get(key) or []) if str(v).strip()))  # noqa: E731
+                # 外号与已有别名（改名留下的旧称）合并；产品/技术/品牌/歧义词以本次大模型输出为准
+                row.aliases = dumps(list(dict.fromkeys(loads_list(row.aliases) + clean("aliases"))))
+                for attr in ("products", "technologies", "brands", "ambiguous_terms"):
+                    setattr(row, attr, dumps([v for v in clean(attr) if v not in GENERIC_TERMS]))
                 row.enriched_at = datetime.now()
                 done += 1
         logger.info(f"[知识库] 大模型扩充进度 {min(i + batch_size, len(todo))}/{len(todo)}")

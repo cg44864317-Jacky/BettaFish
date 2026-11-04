@@ -61,7 +61,7 @@ class JudgeResult:
 
 
 def rule_finance_related(text: str, hits: Dict[str, CompanyHit]) -> bool:
-    if any(b in ("name", "code") for h in hits.values() for b in h.bases):
+    if any(h.strong for h in hits.values()):
         return True
     return any(k in text for k in FINANCE_HINTS)
 
@@ -96,7 +96,7 @@ class TwoStageClassifier:
             for i, t in enumerate(chunk):
                 # 大模型漏判的条目按规则补；知识库命中公司名/代码的一律放行，避免漏掉
                 h = hits[start + i]
-                strong = any(b in ("name", "code") for x in h.values() for b in x.bases)
+                strong = any(x.strong for x in h.values())
                 out.append(strong or verdict.get(i, rule_finance_related(t, h)))
         return out
 
@@ -105,8 +105,9 @@ class TwoStageClassifier:
         full = "\n".join(x for x in (text, asr_text, ocr_text) if x)
         candidates = self.matcher.match(full)
         cand_lines = [
-            f"{h.stock_code} {h.name}（命中：{'、'.join(sorted(h.terms))[:60]}；依据：{'/'.join(sorted(h.bases))}）"
-            for h in sorted(candidates.values(), key=lambda x: -len(x.terms))[:30]
+            f"{h.stock_code} {h.name}（命中：{'、'.join(sorted(h.terms))[:60]}；依据：{'/'.join(sorted(h.bases))}"
+            f"{'' if h.strong else '；弱匹配，可能是日常用语'}）"
+            for h in sorted(candidates.values(), key=lambda x: (not x.strong, -len(x.terms)))[:30]
         ]
         if self.llm is None:
             return self._rule_judge(candidates)
@@ -142,7 +143,7 @@ class TwoStageClassifier:
     @staticmethod
     def _rule_judge(candidates: Dict[str, CompanyHit]) -> JudgeResult:
         """没有大模型时的退化逻辑：命中公司名称或代码即视为分析视频（仅用于测试/应急）。"""
-        strong = [h for h in candidates.values() if {"name", "code"} & h.bases]
+        strong = [h for h in candidates.values() if h.strong]
         mentions = [
             CompanyMention(h.stock_code, h.name, "code" if "code" in h.bases else "name", "neutral", "、".join(sorted(h.terms)), 0.5)
             for h in strong

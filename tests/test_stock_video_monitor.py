@@ -60,6 +60,11 @@ COMPANIES = [
     dict(stock_code="600519", name="贵州茅台", aliases=["茅台"], products=["飞天茅台", "白酒"], brands=["i茅台"]),
     dict(stock_code="002594", name="比亚迪", products=["刀片电池"], technologies=["DM-i"]),
     dict(stock_code="600721", name="*ST百花"),
+    dict(stock_code="300785", name="值得买"),
+    dict(stock_code="001872", name="招商港口", aliases=["蛇口"], products=["高速公路"], enriched_at=None),
+    dict(stock_code="000088", name="盐田港", aliases=["盐田"], ambiguous=["盐田"]),
+    dict(stock_code="000058", name="深赛格", aliases=["赛格电子"]),
+    dict(stock_code="000068", name="华控赛格", aliases=["赛格电子"]),
 ]
 
 
@@ -69,7 +74,8 @@ def seed_kb():
             s.add(AShareCompany(
                 stock_code=c["stock_code"], name=c["name"], aliases=dumps(c.get("aliases", [])),
                 products=dumps(c.get("products", [])), technologies=dumps(c.get("technologies", [])),
-                brands=dumps(c.get("brands", [])), manual_locked=False,
+                brands=dumps(c.get("brands", [])), ambiguous_terms=dumps(c.get("ambiguous", [])),
+                manual_locked=False, enriched_at=c.get("enriched_at", datetime(2026, 11, 1)),
             ))
 
 
@@ -165,6 +171,53 @@ def test_matcher_bases_and_generic_terms(settings):
     assert m.resolve("SZ300750", None) == ("300750", "宁德时代")
     assert m.resolve(None, "茅台") == ("600519", "贵州茅台")
     assert m.resolve("999999", "华为") is None
+
+
+def test_matcher_strong_and_weak_terms(settings):
+    seed_kb()
+    m = matcher_from_kb()
+    assert m.match("宁德时代业绩超预期")["300750"].strong
+    assert m.match("600519")["600519"].strong
+    assert not m.match("这个值得买吗")["300785"].strong          # 简称是日常用语
+    assert not m.match("宁王来了")["300750"].strong               # 2 字外号只是弱候选
+    assert not m.match("麒麟电池真香")["300750"].strong           # 产品命中只是弱候选
+    assert "001872" not in m.match("高速公路堵车")                # 未扩充公司的业务板块不参与匹配
+    assert m.match("盐田港今天涨停")["000088"].strong              # 完整简称是强词
+    assert not m.match("周末去盐田玩")["000088"].strong            # 大模型标为日常用语的外号是弱词
+    shared = m.match("赛格电子大楼")
+    assert {"000058", "000068"} <= set(shared) and not any(h.strong for h in shared.values())  # 多家共用的外号
+    assert m.resolve(None, "赛格电子") is None                   # 有歧义不强行指定
+
+
+def test_create_tables_adds_missing_column(tmp_path):
+    from sqlalchemy import inspect, text
+    engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}", future=True)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE a_share_company (stock_code VARCHAR(10) PRIMARY KEY, name VARCHAR(64))"))
+    mdb.create_tables(engine)
+    assert "ambiguous_terms" in {c["name"] for c in inspect(engine).get_columns("a_share_company")}
+    mdb.create_tables(engine)  # 重复执行不报错
+
+
+def test_enrich_replaces_products_and_records_ambiguous(settings):
+    from StockVideoMonitor.knowledge_base import enrich_with_llm
+
+    with mdb.session_scope() as s:
+        s.add(AShareCompany(stock_code="000088", name="盐田港", aliases=dumps(["旧称"]), products=dumps(["高速公路收费", "仓储服务"]),
+                            main_business="港口装卸", manual_locked=False))
+
+    class EnrichLLM:
+        def complete_json(self, system, user):
+            assert "高速公路收费" in user  # 旧数据里的业务板块仍作为背景材料提供给大模型
+            return {"companies": [{"code": "88", "aliases": ["盐田"], "products": ["盐田国际集装箱码头", "芯片"],
+                                   "technologies": [], "brands": [], "ambiguous_terms": ["盐田"]}]}
+
+    assert enrich_with_llm(EnrichLLM(), refresh=True) == 1
+    with mdb.session_scope() as s:
+        c = s.get(AShareCompany, "000088")
+        assert json.loads(c.aliases) == ["旧称", "盐田"]
+        assert json.loads(c.products) == ["盐田国际集装箱码头"]  # 替换而非合并，且过滤通用词
+        assert json.loads(c.ambiguous_terms) == ["盐田"] and c.enriched_at is not None
 
 
 def test_classifier_drops_unknown_and_applies_threshold(settings):
