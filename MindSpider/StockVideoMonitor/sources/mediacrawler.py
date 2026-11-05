@@ -60,9 +60,11 @@ def _set_config_lines(path: Path, values: Dict[str, str]) -> None:
 class MediaCrawlerSource(DiscoverySource):
     name = "mediacrawler"
 
-    def __init__(self, settings: Optional[MonitorSettings] = None, login_type: str = "qrcode"):
+    def __init__(self, settings: Optional[MonitorSettings] = None, login_type: str = "qrcode",
+                 max_notes: Optional[int] = None):
         self.s = settings or get_settings()
         self.login_type = login_type
+        self.max_notes = max_notes
         if not (MEDIACRAWLER_PATH / "main.py").exists():
             raise SourceError("MediaCrawler 子模块未初始化，请运行 git submodule update --init --recursive")
 
@@ -82,10 +84,11 @@ class MediaCrawlerSource(DiscoverySource):
                 "KEYWORDS": repr(",".join(keywords)),
                 "CRAWLER_TYPE": '"search"',
                 "SAVE_DATA_OPTION": f'"{save_option}"',
-                "CRAWLER_MAX_NOTES_COUNT": str(self.s.STOCK_VIDEO_MEDIACRAWLER_MAX_NOTES),
+                "CRAWLER_MAX_NOTES_COUNT": str(self.max_notes or self.s.STOCK_VIDEO_MEDIACRAWLER_MAX_NOTES),
                 "ENABLE_GET_COMMENTS": "False",
                 "ENABLE_GET_SUB_COMMENTS": "False",
-                "HEADLESS": "True",
+                # 必须用可见浏览器：抖音在无头浏览器里不显示登录按钮，扫码登录和滑块验证也需要看得到窗口
+                "HEADLESS": "False",
             },
         )
         _set_config_lines(MEDIACRAWLER_PATH / "config" / "dy_config.py", {"PUBLISH_TIME_TYPE": "1"})  # 一天内
@@ -98,7 +101,7 @@ class MediaCrawlerSource(DiscoverySource):
         start_ms = int(time.time() * 1000)
         cmd = [
             sys.executable, "main.py", "--platform", "dy", "--lt", self.login_type,
-            "--type", "search", "--save_data_option", save_option,
+            "--type", "search", "--save_data_option", save_option, "--headless", "false",
         ]
         logger.info(f"[MediaCrawler] 搜索 {len(keywords)} 个关键词：{' '.join(cmd)}")
         try:

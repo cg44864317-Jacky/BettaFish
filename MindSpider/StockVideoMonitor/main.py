@@ -11,6 +11,7 @@
     python -m StockVideoMonitor.main add-creator <sec_uid>   # 手动把博主加入博主池
     python -m StockVideoMonitor.main status                  # 查看监控概况
     python -m StockVideoMonitor.main selftest                # 部署自检
+    python -m StockVideoMonitor.main douyin-login            # 抖音扫码登录（首次或登录失效时）
 """
 
 from __future__ import annotations
@@ -87,6 +88,21 @@ def cmd_add_creator(args) -> None:
             logger.info(f"已加入博主池：{uid}")
 
 
+def cmd_douyin_login(_args) -> None:
+    """只做抖音扫码登录 + 一次很小的测试搜索，登录状态会保存下来，之后每日任务不用再扫码。"""
+    from .sources.base import SourceError
+    from .sources.mediacrawler import MediaCrawlerSource
+
+    print("即将打开 Chrome 和抖音登录二维码，请在 10 分钟内用抖音 App 扫码并确认登录。")
+    try:
+        result = MediaCrawlerSource(max_notes=5).search_recent(["A股"])
+    except SourceError as e:
+        print(f"登录或测试搜索失败：{e}")
+        raise SystemExit(1)
+    n = sum(len(v) for v in result.values())
+    print(f"登录成功，测试搜索抓到 {n} 条视频。登录状态已保存，之后的每日任务会自动沿用。")
+
+
 def cmd_selftest(args) -> None:
     from .selftest import run_selftest
 
@@ -146,6 +162,7 @@ def main() -> None:
     ac.add_argument("sec_uids", nargs="+")
     ac.set_defaults(func=cmd_add_creator)
     sub.add_parser("status", help="查看监控概况").set_defaults(func=cmd_status)
+    sub.add_parser("douyin-login", help="抖音扫码登录（首次使用或登录失效时运行）").set_defaults(func=cmd_douyin_login)
     st = sub.add_parser("selftest", help="部署自检：数据库、大模型、TikHub、AKShare、内容解析")
     st.add_argument("--no-tikhub", action="store_true", help="跳过 TikHub 检查（避免产生费用）")
     st.set_defaults(func=cmd_selftest)
