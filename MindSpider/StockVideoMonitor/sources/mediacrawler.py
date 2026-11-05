@@ -57,6 +57,41 @@ def _set_config_lines(path: Path, values: Dict[str, str]) -> None:
     path.write_text("\n".join(out), encoding="utf-8")
 
 
+# MediaCrawler 的 ORM 把这些列定义为 BigInteger，MindSpider 建表时却是 VARCHAR；
+# PostgreSQL 不会隐式比较 varchar 与 bigint，导致 MediaCrawler 入库时报
+# 「操作符不存在: character varying = bigint」。MySQL 会隐式转换，不受影响。
+MEDIACRAWLER_BIGINT_COLUMNS = {
+    "douyin_aweme": ["aweme_id"],
+    "douyin_aweme_comment": ["aweme_id", "comment_id"],
+}
+
+
+def align_mediacrawler_schema(engine=None) -> List[str]:
+    """PostgreSQL 下把上述列从 varchar 改为 bigint（只在类型不一致时执行），返回改动的列。"""
+    from sqlalchemy import inspect
+
+    engine = engine or get_engine()
+    if not engine.dialect.name.startswith("postgres"):
+        return []
+    insp, changed = inspect(engine), []
+    tables = set(insp.get_table_names())
+    for table, cols in MEDIACRAWLER_BIGINT_COLUMNS.items():
+        if table not in tables:
+            continue
+        types = {c["name"]: str(c["type"]).upper() for c in insp.get_columns(table)}
+        for col in cols:
+            if col in types and ("CHAR" in types[col] or "TEXT" in types[col]):
+                with engine.begin() as conn:
+                    conn.execute(text(
+                        f'ALTER TABLE {table} ALTER COLUMN {col} TYPE BIGINT '
+                        f"USING NULLIF(regexp_replace({col}, '[^0-9]', '', 'g'), '')::bigint"
+                    ))
+                changed.append(f"{table}.{col}")
+    if changed:
+        logger.info(f"[MediaCrawler] 已把以下列改为 BIGINT 以兼容 MediaCrawler：{', '.join(changed)}")
+    return changed
+
+
 class MediaCrawlerSource(DiscoverySource):
     name = "mediacrawler"
 
@@ -75,6 +110,7 @@ class MediaCrawlerSource(DiscoverySource):
 
         if not PlatformCrawler().configure_mediacrawler_db():
             raise SourceError("MediaCrawler 数据库配置失败")
+        align_mediacrawler_schema()
         is_pg = (self.s.DB_DIALECT or "mysql").lower() in ("postgresql", "postgres")
         save_option = "postgres" if is_pg else "db"
         _set_config_lines(

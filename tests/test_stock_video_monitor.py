@@ -272,6 +272,11 @@ def test_daily_deltas_handles_gaps():
     assert deltas[1][1]["share_count"] == 5
 
 
+def test_align_schema_noop_on_non_postgres(settings):
+    from StockVideoMonitor.sources.mediacrawler import align_mediacrawler_schema
+    assert align_mediacrawler_schema(mdb.get_engine()) == []  # SQLite / MySQL 不需要改
+
+
 def test_set_config_lines(tmp_path):
     p = tmp_path / "cfg.py"
     p.write_text('PLATFORM = "xhs"\nKEYWORDS = (\n  "a"\n)\nOTHER = 1\nENABLE_GET_COMMENTS = True\n', encoding="utf-8")
