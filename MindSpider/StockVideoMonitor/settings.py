@@ -47,7 +47,8 @@ class MonitorSettings(BaseSettings):
     TIKHUB_API_KEY: Optional[str] = Field(None, description="TikHub API Token")
     TIKHUB_BASE_URL: str = Field("https://api.tikhub.io", description="TikHub 接口地址")
     TIKHUB_TIMEOUT: int = Field(60, description="单次请求超时（秒）")
-    TIKHUB_MAX_RETRIES: int = Field(3, description="429/5xx 时的最大重试次数")
+    TIKHUB_MAX_RETRIES: int = Field(3, description="429/5xx 或 TikHub 提示可重试时的最大重试次数")
+    STOCK_VIDEO_MEDIACRAWLER_ATTEMPTS: int = Field(2, description="MediaCrawler 失败时重试几次再改用 TikHub")
 
     # ------------------------------------------------------------------ 发现新视频
     STOCK_VIDEO_DISCOVERY_SOURCE: str = Field(
@@ -77,7 +78,13 @@ class MonitorSettings(BaseSettings):
     )
     STOCK_VIDEO_KEEP_MEDIA: bool = Field(False, description="解析完是否保留视频文件")
     STOCK_VIDEO_FRAME_INTERVAL: int = Field(5, description="每隔多少秒抽一帧做文字识别")
-    STOCK_VIDEO_MAX_FRAMES: int = Field(24, description="每条视频最多抽多少帧")
+    STOCK_VIDEO_MAX_FRAMES: int = Field(10, description="每条视频最多抽多少帧")
+    STOCK_VIDEO_OCR_TIMEOUT: int = Field(180, description="单条作品文字识别的最长时间（秒），超时跳过")
+    STOCK_VIDEO_DOWNLOAD_TIMEOUT: int = Field(180, description="单个视频/图片下载的最长时间（秒）")
+    STOCK_VIDEO_MAX_DOWNLOAD_MB: int = Field(300, description="单个视频最大下载体积（MB）")
+    STOCK_VIDEO_ANALYSIS_BUDGET_MINUTES: int = Field(
+        120, description="每次运行解析视频的总时长上限（分钟），超过后剩余作品只用文字判断，保证任务按时结束"
+    )
 
     # 语音识别：none | command | openai | funasr
     STOCK_VIDEO_ASR_BACKEND: str = Field("none", description="语音识别后端")

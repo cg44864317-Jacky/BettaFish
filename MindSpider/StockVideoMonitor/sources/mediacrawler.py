@@ -143,12 +143,19 @@ class MediaCrawlerSource(DiscoverySource):
             "--type", "search", "--save_data_option", save_option, "--headless", "false",
         ]
         logger.info(f"[MediaCrawler] 搜索 {len(keywords)} 个关键词：{' '.join(cmd)}")
-        try:
-            result = subprocess.run(cmd, cwd=MEDIACRAWLER_PATH, timeout=3600)
-        except subprocess.TimeoutExpired as e:
-            raise SourceError("MediaCrawler 运行超时") from e
-        if result.returncode != 0:
-            raise SourceError(f"MediaCrawler 退出码 {result.returncode}（可能是登录失效或被风控）")
+        attempts = max(1, self.s.STOCK_VIDEO_MEDIACRAWLER_ATTEMPTS)
+        for attempt in range(1, attempts + 1):
+            try:
+                result = subprocess.run(cmd, cwd=MEDIACRAWLER_PATH, timeout=3600)
+            except subprocess.TimeoutExpired as e:
+                raise SourceError("MediaCrawler 运行超时") from e
+            if result.returncode == 0:
+                break
+            if attempt < attempts:  # 偶发的页面加载超时等，重试一次通常就能成功
+                logger.warning(f"[MediaCrawler] 第 {attempt} 次运行失败（退出码 {result.returncode}），30 秒后重试")
+                time.sleep(30)
+        else:
+            raise SourceError(f"MediaCrawler 退出码 {result.returncode}（可能是登录失效、网络慢或被风控）")
         out = self.read_back(keywords, start_ms)
         if not any(out.values()):
             raise SourceError("MediaCrawler 运行完成但没有抓到任何视频（可能是登录失效或被风控）")

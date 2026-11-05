@@ -45,7 +45,9 @@ class OpenAICompatLLM:
         api_key = s.STOCK_VIDEO_LLM_API_KEY or s.MINDSPIDER_API_KEY
         if not api_key:
             raise RuntimeError("未配置大模型 API Key（STOCK_VIDEO_LLM_API_KEY 或 MINDSPIDER_API_KEY）")
-        self.client = OpenAI(api_key=api_key, base_url=s.STOCK_VIDEO_LLM_BASE_URL or s.MINDSPIDER_BASE_URL)
+        # 设置超时，避免个别请求无响应时把整个每日任务卡住
+        self.client = OpenAI(api_key=api_key, base_url=s.STOCK_VIDEO_LLM_BASE_URL or s.MINDSPIDER_BASE_URL,
+                             timeout=120, max_retries=1)
         self.model = s.STOCK_VIDEO_LLM_MODEL or s.MINDSPIDER_MODEL_NAME
 
     def complete_json(self, system: str, user: str, retries: int = 2) -> Any:

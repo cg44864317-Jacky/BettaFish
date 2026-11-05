@@ -17,18 +17,21 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Optional, Protocol
 
 import httpx
 from loguru import logger
 
-from .settings import MonitorSettings, get_settings
+from .settings import MINDSPIDER_ROOT, MonitorSettings, get_settings
 
 DOUYIN_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -141,32 +144,30 @@ class CommandFrameReader:
         return _dedupe_lines(lines)
 
 
-class RapidOCRFrameReader:
-    def __init__(self):
-        from rapidocr_onnxruntime import RapidOCR  # type: ignore
+class SubprocessOCRFrameReader:
+    """在子进程里运行 RapidOCR / PaddleOCR，超时就结束子进程并返回空结果，避免识别库卡死拖住每日任务。"""
 
-        self.engine = RapidOCR()
-
-    def read(self, image_paths: List[Path]) -> str:
-        lines: List[str] = []
-        for p in image_paths:
-            result, _ = self.engine(str(p))
-            lines.extend(item[1] for item in result or [])
-        return _dedupe_lines(lines)
-
-
-class PaddleOCRFrameReader:
-    def __init__(self):
-        from paddleocr import PaddleOCR  # type: ignore
-
-        self.engine = PaddleOCR(use_angle_cls=False, lang="ch", show_log=False)
+    def __init__(self, backend: str, timeout: int = 180):
+        self.backend, self.timeout = backend, timeout
 
     def read(self, image_paths: List[Path]) -> str:
-        lines: List[str] = []
-        for p in image_paths:
-            for page in self.engine.ocr(str(p)) or []:
-                lines.extend(item[1][0] for item in page or [])
-        return _dedupe_lines(lines)
+        if not image_paths:
+            return ""
+        cmd = [sys.executable, "-m", "StockVideoMonitor.ocr_worker", self.backend, *[str(p) for p in image_paths]]
+        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=self.timeout, cwd=str(MINDSPIDER_ROOT), env=env)
+        except subprocess.TimeoutExpired:
+            logger.warning(f"[解析] 文字识别超过 {self.timeout}s 已中止（{len(image_paths)} 张图）")
+            return ""
+        if r.returncode != 0:
+            logger.warning(f"[解析] 文字识别出错：{r.stderr.decode('utf-8', 'replace')[-300:]}")
+            return ""
+        try:
+            out = r.stdout.decode("utf-8", "replace").strip().splitlines()
+            return _dedupe_lines(json.loads(out[-1]) if out else [])
+        except ValueError:
+            return ""
 
 
 def build_frame_reader(s: Optional[MonitorSettings] = None) -> FrameReader:
@@ -174,10 +175,8 @@ def build_frame_reader(s: Optional[MonitorSettings] = None) -> FrameReader:
     backend = (s.STOCK_VIDEO_OCR_BACKEND or "none").lower()
     if backend == "command":
         return CommandFrameReader(s.STOCK_VIDEO_OCR_COMMAND or "")
-    if backend == "rapidocr":
-        return RapidOCRFrameReader()
-    if backend == "paddleocr":
-        return PaddleOCRFrameReader()
+    if backend in ("rapidocr", "paddleocr"):
+        return SubprocessOCRFrameReader(backend, s.STOCK_VIDEO_OCR_TIMEOUT)
     return NoopFrameReader()
 
 
@@ -227,16 +226,29 @@ class MediaAnalyzer:
             self._cleanup(work)
 
     def download(self, url: str, dest: Path) -> Path:
-        with httpx.stream("GET", url, headers=DOUYIN_HEADERS, follow_redirects=True, timeout=120) as r:
+        """下载有总时长和大小上限，避免慢速或超大文件卡住流程。"""
+        deadline = time.time() + self.s.STOCK_VIDEO_DOWNLOAD_TIMEOUT
+        max_bytes = self.s.STOCK_VIDEO_MAX_DOWNLOAD_MB * 1024 * 1024
+        size = 0
+        with httpx.stream("GET", url, headers=DOUYIN_HEADERS, follow_redirects=True, timeout=60) as r:
             r.raise_for_status()
             with open(dest, "wb") as f:
                 for chunk in r.iter_bytes(1 << 16):
                     f.write(chunk)
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise RuntimeError(f"文件超过 {self.s.STOCK_VIDEO_MAX_DOWNLOAD_MB}MB，跳过")
+                    if time.time() > deadline:
+                        raise RuntimeError(f"下载超过 {self.s.STOCK_VIDEO_DOWNLOAD_TIMEOUT}s，跳过")
         return dest
 
     @staticmethod
-    def _ffmpeg(args: List[str]) -> None:
-        r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args], capture_output=True, text=True)
+    def _ffmpeg(args: List[str], timeout: int = 300) -> None:
+        try:
+            r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args],
+                               capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"ffmpeg 超过 {timeout}s") from e
         if r.returncode != 0:
             raise RuntimeError(f"ffmpeg 失败：{r.stderr[-300:]}")
 

@@ -169,7 +169,9 @@ class TikHubClient:
                         raise SourceError(f"TikHub {path} 返回错误码 {code}: {body.get('message')}")
                     self.calls += 1
                     return body.get("data", body) if isinstance(body, dict) else body
-                if resp.status_code in (429, 500, 502, 503, 504):
+                if resp.status_code in (429, 500, 502, 503, 504) or (
+                    resp.status_code == 400 and "retry" in resp.text.lower() and "charged" in resp.text.lower()
+                ):  # TikHub 对偶发失败返回 400「Request failed. Please retry ... won't be charged」，可以重试
                     last_err = SourceError(f"TikHub {path} HTTP {resp.status_code}")
                 else:
                     raise SourceError(f"TikHub {path} HTTP {resp.status_code}: {resp.text[:300]}")

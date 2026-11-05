@@ -159,15 +159,19 @@ class DailyDiscovery:
         with session_scope() as s:
             rows = list(s.scalars(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id.in_(aweme_ids))))
         texts = {r.aweme_id: "\n".join(x for x in (r.title, r.desc, " ".join("#" + t for t in loads_list(r.hashtags))) if x) for r in rows}
-        verdicts = self.classifier.prefilter([texts[r.aweme_id] for r in rows])
-        finance_ids = [r.aweme_id for r, ok in zip(rows, verdicts) if ok]
+        # 上次中断、已粗筛通过但还没精判的作品（stage=finance）直接进入精判；新作品先粗筛
+        new_rows = [r for r in rows if r.stage == "new"]
+        resumed = [r.aweme_id for r in rows if r.stage == "finance"]
+        verdicts = self.classifier.prefilter([texts[r.aweme_id] for r in new_rows]) if new_rows else []
+        finance_ids = resumed + [r.aweme_id for r, ok in zip(new_rows, verdicts) if ok]
         with session_scope() as s:
-            for r, ok in zip(rows, verdicts):
+            for r, ok in zip(new_rows, verdicts):
                 row = s.get(DouyinStockVideo, r.id)
                 row.finance_related = ok
                 row.stage = "finance" if ok else "prefilter_rejected"
         stats.finance = len(finance_ids)
-        logger.info(f"[识别] 粗筛：{len(rows)} 条中 {len(finance_ids)} 条与股票相关")
+        logger.info(f"[识别] 粗筛：{len(new_rows)} 条新作品中 {len(finance_ids) - len(resumed)} 条与股票相关"
+                    + (f"；另有 {len(resumed)} 条上次未完成精判，继续处理" if resumed else ""))
 
         fresh: Dict[str, VideoRecord] = {}
         if self.tracking and finance_ids:  # 播放地址几小时就会过期，解析前刷新一次，顺便拿到最新互动数
@@ -176,9 +180,19 @@ class DailyDiscovery:
             except SourceError as e:
                 logger.warning(f"[识别] 刷新视频详情失败，使用发现时的地址：{e}")
 
+        deadline = time.time() + self.s.STOCK_VIDEO_ANALYSIS_BUDGET_MINUTES * 60
+        budget_warned = False
         for i, aid in enumerate(finance_ids, 1):
+            t0 = time.time()
+            flagged_before = stats.flagged
+            skip_media = time.time() > deadline
+            if skip_media and not budget_warned:
+                budget_warned = True
+                logger.warning(f"[识别] 已超过解析时间预算（{self.s.STOCK_VIDEO_ANALYSIS_BUDGET_MINUTES} 分钟），剩余作品只用文字判断")
             try:
-                self._judge_one(aid, texts[aid], fresh.get(aid), now, stats)
+                self._judge_one(aid, texts[aid], fresh.get(aid), now, stats, skip_media=skip_media)
+                logger.info(f"[识别] ({i}/{len(finance_ids)}) {aid} 完成，用时 {time.time() - t0:.0f}s"
+                            f"{'，标记为上市公司分析' if stats.flagged > flagged_before else ''}")
             except Exception as e:
                 stats.failed += 1
                 logger.exception(f"[识别] {aid} 处理失败：{e}")
@@ -188,7 +202,18 @@ class DailyDiscovery:
             if i % 20 == 0:
                 logger.info(f"[识别] 精判进度 {i}/{len(finance_ids)}，已标记 {stats.flagged} 条")
 
-    def _judge_one(self, aid: str, text: str, fresh: Optional[VideoRecord], now: datetime, stats: DiscoveryStats) -> None:
+    def pending_ids(self, now: datetime) -> List[str]:
+        """最近两天内发现、但上次运行中断而未完成识别的作品。"""
+        since = now - timedelta(hours=48)
+        with session_scope() as s:
+            return list(s.scalars(
+                select(DouyinStockVideo.aweme_id).where(
+                    DouyinStockVideo.stage.in_(["new", "finance"]), DouyinStockVideo.discovered_at >= since
+                )
+            ))
+
+    def _judge_one(self, aid: str, text: str, fresh: Optional[VideoRecord], now: datetime, stats: DiscoveryStats,
+                   skip_media: bool = False) -> None:
         with session_scope() as s:
             row = s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == aid))
             video_url = (fresh.video_url if fresh else None) or row.video_url
@@ -196,7 +221,9 @@ class DailyDiscovery:
             is_image = row.is_image_post or bool(fresh and fresh.is_image_post)
         asr_text, ocr_text = "", ""
         try:
-            if is_image:
+            if skip_media:
+                pass
+            elif is_image:
                 asr_text, ocr_text = "", self.analyzer.analyze_images(aid, image_urls)
             else:
                 asr_text, ocr_text = self.analyzer.analyze(aid, video_url)
@@ -255,8 +282,8 @@ class DailyDiscovery:
         stats = DiscoveryStats()
         t0 = time.time()
         records = self.collect(now, stats)
-        new_ids = self.store_new(records, now, stats)
-        self.classify(new_ids, now, stats)
+        self.store_new(records, now, stats)
+        self.classify(self.pending_ids(now), now, stats)  # 含本次新增，以及上次中断未完成的
         logger.info(
             f"[发现] 完成，用时 {time.time() - t0:.0f}s：候选 {stats.candidates}，新增 {stats.new_videos}，"
             f"股票相关 {stats.finance}，标记为上市公司分析 {stats.flagged}，失败 {stats.failed}"

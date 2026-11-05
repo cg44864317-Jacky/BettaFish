@@ -503,3 +503,91 @@ def test_split_command_windows_paths(monkeypatch):
     assert cmd == [r"C:\Program Files\analyzer\analyzer.exe", "transcribe", "a.wav"]
     monkeypatch.setattr(media_mod.os, "name", "posix")
     assert media_mod.split_command("analyzer --in '{input}'", Path("b.wav")) == ["analyzer", "--in", "b.wav"]
+
+
+# ---------------------------------------------------------------------- 稳定性：超时、重试、断点续跑
+def test_tikhub_retries_retryable_400(settings, monkeypatch):
+    monkeypatch.setattr(th.time, "sleep", lambda *_: None)
+    n = {"calls": 0}
+
+    def handler(request):
+        n["calls"] += 1
+        if n["calls"] == 1:
+            return httpx.Response(400, json={"detail": {"message": "Request failed. Please retry. You won't be charged for this request."}})
+        return httpx.Response(200, json={"code": 200, "data": {"ok": 1}})
+
+    client = th.TikHubClient(settings, transport=httpx.MockTransport(handler))
+    assert client.request("GET", "/x") == {"ok": 1} and n["calls"] == 2
+    bad = th.TikHubClient(settings, transport=httpx.MockTransport(lambda r: httpx.Response(400, json={"detail": "bad param"})))
+    with pytest.raises(th.SourceError):
+        bad.request("GET", "/x")  # 普通 400 不重试
+
+
+def test_ocr_subprocess_timeout_and_success(monkeypatch, tmp_path):
+    import subprocess
+    reader = media_mod.SubprocessOCRFrameReader("rapidocr", timeout=5)
+    img = tmp_path / "a.jpg"
+    img.write_bytes(b"x")
+
+    def hang(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="ocr", timeout=5)
+
+    monkeypatch.setattr(media_mod.subprocess, "run", hang)
+    assert reader.read([img]) == ""  # 超时不抛异常，返回空
+
+    class R:
+        returncode, stderr = 0, b""
+        stdout = json.dumps(["茅台 600519", "茅台 600519", "x"], ensure_ascii=False).encode("utf-8")
+
+    monkeypatch.setattr(media_mod.subprocess, "run", lambda *a, **k: R())
+    assert reader.read([img]) == "茅台 600519"  # 去重并过滤过短的行
+
+
+def test_download_size_limit(settings, monkeypatch, tmp_path):
+    from contextlib import contextmanager
+
+    class Resp:
+        def raise_for_status(self): pass
+        def iter_bytes(self, n):
+            for _ in range(10):
+                yield b"x" * (1024 * 1024)
+
+    @contextmanager
+    def fake_stream(*a, **k):
+        yield Resp()
+
+    s = make_settings(tmp_path, STOCK_VIDEO_MAX_DOWNLOAD_MB=3)
+    analyzer = MediaAnalyzer(s, transcriber=NoopTranscriber(), frame_reader=NoopFrameReader())
+    monkeypatch.setattr(media_mod.httpx, "stream", fake_stream)
+    with pytest.raises(RuntimeError, match="3MB"):
+        analyzer.download("https://v/x.mp4", tmp_path / "x.mp4")
+
+
+def test_resume_unfinished_and_time_budget(settings):
+    """上次中断（stage=finance）的作品下次继续精判；超过时间预算后不再下载解析。"""
+    seed_kb()
+    day = datetime(2026, 11, 5, 17, 0)
+    ts = int((day - timedelta(hours=2)).timestamp())
+    with mdb.session_scope() as s:
+        s.add(DouyinStockVideo(aweme_id="r1", desc="茅台深度分析", create_time=ts, discovered_at=day,
+                               stage="finance", finance_related=True, is_tracked=False, tracking_status="none", miss_count=0))
+
+    class CountingAnalyzer(MediaAnalyzer):
+        calls = 0
+        def analyze(self, aid, url):
+            CountingAnalyzer.calls += 1
+            return "", ""
+
+    analyzer = CountingAnalyzer(settings, transcriber=NoopTranscriber(), frame_reader=NoopFrameReader())
+    disc = FakeDiscovery({"股票": [rec("n1", "宁王麒麟电池股票分析", ts)]})
+    clf = TwoStageClassifier(matcher_from_kb(), FakeLLM())
+    stats = DailyDiscovery(disc, clf, analyzer, FakeTracking(), settings, hot_keywords_fn=lambda n: []).run(day + timedelta(hours=1))
+    assert stats.flagged == 2 and CountingAnalyzer.calls == 2  # r1 续跑 + n1 新增
+    with mdb.session_scope() as s:
+        assert s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == "r1")).stage == "analyzed"
+
+    budget0 = make_settings(Path(settings.STOCK_VIDEO_MEDIA_DIR).parent, STOCK_VIDEO_ANALYSIS_BUDGET_MINUTES=0)
+    disc2 = FakeDiscovery({"股票": [rec("n2", "茅台股票分析", ts)]})
+    CountingAnalyzer.calls = 0
+    st2 = DailyDiscovery(disc2, clf, analyzer, FakeTracking(), budget0, hot_keywords_fn=lambda n: []).run(day + timedelta(hours=2))
+    assert st2.flagged == 1 and CountingAnalyzer.calls == 0  # 超预算：只用文字判断
