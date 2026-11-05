@@ -89,6 +89,9 @@ class MediaCrawlerSource(DiscoverySource):
                 "ENABLE_GET_SUB_COMMENTS": "False",
                 # 必须用可见浏览器：抖音在无头浏览器里不显示登录按钮，扫码登录和滑块验证也需要看得到窗口
                 "HEADLESS": "False",
+                # 不用 CDP 模式：CDP 模式下页面宽度跟随屏幕，在缩放较大的屏幕上抖音的登录按钮会被挤到视口外无法点击；
+                # 内置浏览器的页面固定为 1920x1080，登录状态同样会保存
+                "ENABLE_CDP_MODE": "False",
             },
         )
         _set_config_lines(MEDIACRAWLER_PATH / "config" / "dy_config.py", {"PUBLISH_TIME_TYPE": "1"})  # 一天内
