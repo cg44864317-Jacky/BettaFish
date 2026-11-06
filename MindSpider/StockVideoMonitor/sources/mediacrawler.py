@@ -103,7 +103,7 @@ class MediaCrawlerSource(DiscoverySource):
         if not (MEDIACRAWLER_PATH / "main.py").exists():
             raise SourceError("MediaCrawler 子模块未初始化，请运行 git submodule update --init --recursive")
 
-    def _configure(self, keywords: List[str]) -> str:
+    def _configure(self, keywords: List[str], publish_days: int = 1) -> str:
         sys.path.insert(0, str(MINDSPIDER_ROOT / "DeepSentimentCrawling"))
         sys.path.insert(0, str(MINDSPIDER_ROOT))
         from platform_crawler import PlatformCrawler  # type: ignore
@@ -130,13 +130,19 @@ class MediaCrawlerSource(DiscoverySource):
                 "ENABLE_CDP_MODE": "False",
             },
         )
-        _set_config_lines(MEDIACRAWLER_PATH / "config" / "dy_config.py", {"PUBLISH_TIME_TYPE": "1"})  # 一天内
+        _set_config_lines(MEDIACRAWLER_PATH / "config" / "dy_config.py",
+                          {"PUBLISH_TIME_TYPE": "7" if publish_days > 1 else "1"})  # 一天内；漏跑补抓时一周内
         return save_option
 
-    def search_recent(self, keywords: List[str]) -> Dict[str, List[VideoRecord]]:
+    def search_recent(self, keywords: List[str], publish_days: int = 1) -> Dict[str, List[VideoRecord]]:
         if not keywords:
             return {}
-        save_option = self._configure(keywords)
+        timeout = 3600
+        if self.deadline:  # 给后面的识别留出至少 30 分钟
+            timeout = int(min(timeout, self.deadline - time.time() - 30 * 60))
+            if timeout < 300:
+                raise SourceError("距每日截止时间太近，跳过 MediaCrawler")
+        save_option = self._configure(keywords, publish_days)
         start_ms = int(time.time() * 1000)
         cmd = [
             sys.executable, "main.py", "--platform", "dy", "--lt", self.login_type,
@@ -144,9 +150,13 @@ class MediaCrawlerSource(DiscoverySource):
         ]
         logger.info(f"[MediaCrawler] 搜索 {len(keywords)} 个关键词：{' '.join(cmd)}")
         attempts = max(1, self.s.STOCK_VIDEO_MEDIACRAWLER_ATTEMPTS)
+        give_up_at = time.time() + timeout
         for attempt in range(1, attempts + 1):
+            remaining = int(give_up_at - time.time())
+            if remaining < 120:
+                raise SourceError("MediaCrawler 重试时间不足（每日截止时间临近）")
             try:
-                result = subprocess.run(cmd, cwd=MEDIACRAWLER_PATH, timeout=3600)
+                result = subprocess.run(cmd, cwd=MEDIACRAWLER_PATH, timeout=remaining)
             except subprocess.TimeoutExpired as e:
                 raise SourceError("MediaCrawler 运行超时") from e
             if result.returncode == 0:

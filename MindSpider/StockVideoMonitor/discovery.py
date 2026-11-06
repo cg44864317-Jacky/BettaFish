@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .classifier import TwoStageClassifier
 from .db import session_scope
@@ -35,6 +35,8 @@ class DiscoveryStats:
     finance: int = 0
     flagged: int = 0
     failed: int = 0
+    deferred: int = 0  # 到截止时间仍未处理、留到下次运行的作品数
+    lookback_hours: int = 0
     source_used: Optional[str] = None
     channel_counts: Dict[str, int] = field(default_factory=dict)
 
@@ -85,14 +87,29 @@ class DailyDiscovery:
         self.hot_keywords_fn = hot_keywords_fn
 
     # -------------------------------------------------------------- 召回
+    def lookback_hours(self, now: datetime) -> int:
+        """正常为 26 小时；距上次发现超过这个时间（漏跑）就自动扩大窗口，最多 72 小时。"""
+        with session_scope() as s:
+            last = s.scalar(select(func.max(DouyinStockVideo.discovered_at)))
+        base = self.s.STOCK_VIDEO_LOOKBACK_HOURS
+        if not last:
+            return base
+        gap = (now - last).total_seconds() / 3600 + 2
+        return int(min(max(base, gap), max(base, self.s.STOCK_VIDEO_MAX_LOOKBACK_HOURS)))
+
     def collect(self, now: datetime, stats: DiscoveryStats) -> Dict[str, VideoRecord]:
-        since_ts = int((now - timedelta(hours=self.s.STOCK_VIDEO_LOOKBACK_HOURS)).timestamp())
+        hours = self.lookback_hours(now)
+        stats.lookback_hours = hours
+        if hours > self.s.STOCK_VIDEO_LOOKBACK_HOURS:
+            logger.info(f"[发现] 距上次运行较久，本次发现窗口扩大到 {hours} 小时")
+        since_ts = int((now - timedelta(hours=hours)).timestamp())
+        publish_days = 1 if hours <= self.s.STOCK_VIDEO_LOOKBACK_HOURS else 7
         groups: Dict[str, List[VideoRecord]] = {}
 
         base_kw = list(dict.fromkeys(self.s.STOCK_VIDEO_SEARCH_KEYWORDS))
         hot_kw = [k for k in self.hot_keywords_fn(self.s.STOCK_VIDEO_HOT_STOCK_KEYWORDS) if k not in base_kw]
         try:
-            by_kw = self.discovery.search_recent(base_kw + hot_kw)
+            by_kw = self.discovery.search_recent(base_kw + hot_kw, publish_days)
             stats.source_used = getattr(self.discovery, "used", None) or self.discovery.name
             for kw, recs in by_kw.items():
                 groups[f"{'hot' if kw in hot_kw else 'keyword'}:{kw}"] = recs
@@ -153,7 +170,8 @@ class DailyDiscovery:
         return new_ids
 
     # -------------------------------------------------------------- 识别
-    def classify(self, aweme_ids: List[str], now: datetime, stats: DiscoveryStats) -> None:
+    def classify(self, aweme_ids: List[str], now: datetime, stats: DiscoveryStats,
+                 hard_deadline: Optional[datetime] = None) -> None:
         if not aweme_ids:
             return
         with session_scope() as s:
@@ -181,8 +199,15 @@ class DailyDiscovery:
                 logger.warning(f"[识别] 刷新视频详情失败，使用发现时的地址：{e}")
 
         deadline = time.time() + self.s.STOCK_VIDEO_ANALYSIS_BUDGET_MINUTES * 60
+        stop_at = hard_deadline.timestamp() if hard_deadline else None
+        if stop_at:  # 截止前 8 分钟起只用文字判断（每条只需几秒），到截止时间就停
+            deadline = min(deadline, stop_at - 8 * 60)
         budget_warned = False
         for i, aid in enumerate(finance_ids, 1):
+            if stop_at and time.time() >= stop_at:
+                stats.deferred = len(finance_ids) - i + 1
+                logger.warning(f"[识别] 已到截止时间，剩余 {stats.deferred} 条留到下次运行处理")
+                break
             t0 = time.time()
             flagged_before = stats.flagged
             skip_media = time.time() > deadline
@@ -203,8 +228,8 @@ class DailyDiscovery:
                 logger.info(f"[识别] 精判进度 {i}/{len(finance_ids)}，已标记 {stats.flagged} 条")
 
     def pending_ids(self, now: datetime) -> List[str]:
-        """最近两天内发现、但上次运行中断而未完成识别的作品。"""
-        since = now - timedelta(hours=48)
+        """近几天内发现、但上次运行中断（或到截止时间）而未完成识别的作品。"""
+        since = now - timedelta(hours=max(48, self.s.STOCK_VIDEO_MAX_LOOKBACK_HOURS))
         with session_scope() as s:
             return list(s.scalars(
                 select(DouyinStockVideo.aweme_id).where(
@@ -277,15 +302,18 @@ class DailyDiscovery:
                 c.last_flagged_at = now
 
     # -------------------------------------------------------------- 入口
-    def run(self, now: Optional[datetime] = None) -> DiscoveryStats:
+    def run(self, now: Optional[datetime] = None, hard_deadline: Optional[datetime] = None) -> DiscoveryStats:
         now = now or datetime.now()
         stats = DiscoveryStats()
         t0 = time.time()
+        if hasattr(self.discovery, "set_deadline"):
+            self.discovery.set_deadline(hard_deadline.timestamp() if hard_deadline else None)
         records = self.collect(now, stats)
         self.store_new(records, now, stats)
-        self.classify(self.pending_ids(now), now, stats)  # 含本次新增，以及上次中断未完成的
+        self.classify(self.pending_ids(now), now, stats, hard_deadline)  # 含本次新增，以及上次中断未完成的
         logger.info(
             f"[发现] 完成，用时 {time.time() - t0:.0f}s：候选 {stats.candidates}，新增 {stats.new_videos}，"
             f"股票相关 {stats.finance}，标记为上市公司分析 {stats.flagged}，失败 {stats.failed}"
+            + (f"，留到下次 {stats.deferred}" if stats.deferred else "")
         )
         return stats

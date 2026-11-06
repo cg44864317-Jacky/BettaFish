@@ -97,7 +97,8 @@ class FakeDiscovery(DiscoverySource):
         self.by_kw, self.creator_posts = by_kw, creator_posts or {}
         self.creator_calls = []
 
-    def search_recent(self, keywords):
+    def search_recent(self, keywords, publish_days=1):
+        self.publish_days = publish_days
         return {k: self.by_kw.get(k, []) for k in keywords}
 
     def creator_recent_posts(self, sec_uids, since_ts):
@@ -666,3 +667,36 @@ def test_daily_report_workbook(settings, tmp_path):
     assert len(daily) == 4  # 2 条作品 × 2 天
     summary = {r[1]: r for r in wb["公司汇总"].iter_rows(min_row=2, values_only=True)}
     assert summary["300750"][2] == 1 and summary["300750"][10] == 1000
+
+
+def test_scheduled_run_skips_late_start(settings):
+    from MindSpider.StockVideoMonitor.pipeline import finish_deadline, run_daily
+
+    late = datetime(2026, 11, 9, 6, 55)
+    assert finish_deadline(late, settings) == datetime(2026, 11, 9, 6, 50)
+    assert run_daily(now=late, settings=settings, enforce_deadline=True)["skipped"] == "late_start"
+
+
+def test_hard_deadline_defers_remaining_and_lookback_widens(settings):
+    """到截止时间就停，剩余作品保持 finance 留到下次；漏跑后发现窗口自动扩大并改搜最近一周。"""
+    seed_kb()
+    day = datetime(2026, 11, 9, 5, 0)
+    ts = int((day - timedelta(hours=2)).timestamp())
+    with mdb.session_scope() as s:  # 上次发现是 3 天前（周末电脑关机）
+        s.add(DouyinStockVideo(aweme_id="old", desc="旧视频", create_time=ts - 3 * 86400,
+                               discovered_at=day - timedelta(days=3), stage="analyzed", finance_related=False,
+                               is_tracked=False, tracking_status="none", miss_count=0))
+    disc = FakeDiscovery({"股票": [rec("d1", "茅台股票分析", ts), rec("d2", "宁王麒麟电池股票分析", ts)]})
+    analyzer = MediaAnalyzer(settings, transcriber=NoopTranscriber(), frame_reader=NoopFrameReader())
+    clf = TwoStageClassifier(matcher_from_kb(), FakeLLM())
+    dd = DailyDiscovery(disc, clf, analyzer, FakeTracking(), settings, hot_keywords_fn=lambda n: [])
+    stats = dd.run(day, hard_deadline=datetime.now() - timedelta(seconds=1))
+    assert stats.lookback_hours == 72 and disc.publish_days == 7
+    assert stats.deferred == 2 and stats.flagged == 0
+    with mdb.session_scope() as s:
+        stages = {v.aweme_id: v.stage for v in s.scalars(select(DouyinStockVideo))}
+    assert stages["d1"] == stages["d2"] == "finance"
+    # 下次运行（无截止压力）继续处理，窗口恢复为 26 小时
+    disc2 = FakeDiscovery({})
+    st2 = DailyDiscovery(disc2, clf, analyzer, FakeTracking(), settings, hot_keywords_fn=lambda n: []).run(day + timedelta(hours=1))
+    assert st2.flagged == 2 and st2.lookback_hours == 26 and disc2.publish_days == 1

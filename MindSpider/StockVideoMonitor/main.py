@@ -52,7 +52,8 @@ def cmd_run(args) -> None:
     from .pipeline import run_daily
 
     create_tables()
-    summary = run_daily(skip_discovery=args.skip_discovery, skip_tracking=args.skip_tracking)
+    summary = run_daily(skip_discovery=args.skip_discovery, skip_tracking=args.skip_tracking,
+                        enforce_deadline=args.scheduled)
     logger.info("本次运行汇总：\n" + json.dumps(summary, ensure_ascii=False, indent=2, default=str))
 
 
@@ -169,6 +170,8 @@ def main() -> None:
     run = sub.add_parser("run", help="执行一次每日任务")
     run.add_argument("--skip-discovery", action="store_true")
     run.add_argument("--skip-tracking", action="store_true")
+    run.add_argument("--scheduled", action="store_true",
+                     help="计划任务模式：必须在 STOCK_VIDEO_FINISH_BY（默认 06:50）前结束，启动太晚则跳过")
     run.set_defaults(func=cmd_run)
 
     sub.add_parser("track", help="只执行跟踪和预警").set_defaults(func=cmd_track)

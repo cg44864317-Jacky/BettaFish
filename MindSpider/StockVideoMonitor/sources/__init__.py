@@ -27,11 +27,16 @@ class FallbackDiscovery(DiscoverySource):
         self.sources = sources
         self.used: Optional[str] = None
 
-    def search_recent(self, keywords: List[str]) -> Dict[str, List[VideoRecord]]:
+    def set_deadline(self, deadline) -> None:
+        self.deadline = deadline
+        for src in self.sources:
+            src.set_deadline(deadline)
+
+    def search_recent(self, keywords: List[str], publish_days: int = 1) -> Dict[str, List[VideoRecord]]:
         errors = []
         for src in self.sources:
             try:
-                result = src.search_recent(keywords)
+                result = src.search_recent(keywords, publish_days)
                 self.used = src.name
                 return result
             except SourceError as e:

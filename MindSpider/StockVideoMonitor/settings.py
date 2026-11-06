@@ -69,6 +69,13 @@ class MonitorSettings(BaseSettings):
     STOCK_VIDEO_CREATOR_POOL_ENABLED: bool = Field(True, description="是否拉取财经博主池里博主的最新作品")
     STOCK_VIDEO_CREATOR_POOL_MAX: int = Field(300, description="每天最多拉取多少个博主（按最近活跃排序）")
     STOCK_VIDEO_LOOKBACK_HOURS: int = Field(26, description="只保留多少小时内发布的视频（略大于 24 防漏）")
+    STOCK_VIDEO_MAX_LOOKBACK_HOURS: int = Field(
+        72, description="上次运行距今较久（如电脑关机漏跑）时，自动扩大发现窗口的上限（小时）"
+    )
+    STOCK_VIDEO_FINISH_BY: str = Field(
+        "06:50", description="计划任务必须在此时间前结束（HH:MM），晚于此时间启动的计划任务直接跳过"
+    )
+    STOCK_VIDEO_RESERVE_MINUTES: int = Field(10, description="为预警和生成跟踪表预留的分钟数")
 
     # ------------------------------------------------------------------ 识别
     STOCK_VIDEO_PREFILTER_BATCH: int = Field(20, description="粗筛时每次让大模型判断多少条视频")

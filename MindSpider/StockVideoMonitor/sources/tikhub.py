@@ -180,7 +180,7 @@ class TikHubClient:
         raise SourceError(f"TikHub {path} 重试后仍失败: {last_err}")
 
     # -- 搜索
-    def search_videos(self, keyword: str, pages: int) -> List[VideoRecord]:
+    def search_videos(self, keyword: str, pages: int, publish_days: int = 1) -> List[VideoRecord]:
         cursor, search_id, backtrace = 0, "", ""
         results: List[VideoRecord] = []
         for page in range(max(1, pages)):
@@ -192,7 +192,7 @@ class TikHubClient:
                         "keyword": keyword,
                         "cursor": cursor,
                         "sort_type": "2",  # 最新发布
-                        "publish_time": "1",  # 最近一天
+                        "publish_time": "7" if publish_days > 1 else "1",  # 最近一天；漏跑后补抓时用最近一周
                         "filter_duration": "0",
                         "content_type": "0",  # 视频和图文都要
                         "search_id": search_id,
@@ -262,11 +262,11 @@ class TikHubSource(DiscoverySource, TrackingSource):
         self.s = settings or get_settings()
         self.client = client or TikHubClient(self.s)
 
-    def search_recent(self, keywords: List[str]) -> Dict[str, List[VideoRecord]]:
+    def search_recent(self, keywords: List[str], publish_days: int = 1) -> Dict[str, List[VideoRecord]]:
         out: Dict[str, List[VideoRecord]] = {}
         for kw in keywords:
             try:
-                out[kw] = self.client.search_videos(kw, self.s.STOCK_VIDEO_SEARCH_PAGES)
+                out[kw] = self.client.search_videos(kw, self.s.STOCK_VIDEO_SEARCH_PAGES, publish_days)
                 logger.info(f"[TikHub] 关键词「{kw}」搜到 {len(out[kw])} 条")
             except SourceError as e:
                 logger.warning(f"[TikHub] 关键词「{kw}」搜索失败：{e}")

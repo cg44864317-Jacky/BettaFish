@@ -56,10 +56,14 @@ class DiscoverySource(ABC):
     """发现新视频（关键词搜索 / 博主主页）。"""
 
     name: str = "base"
+    deadline: Optional[float] = None  # 搜索必须结束的时间戳（每日任务截止前给识别留出时间）
+
+    def set_deadline(self, deadline: Optional[float]) -> None:
+        self.deadline = deadline
 
     @abstractmethod
-    def search_recent(self, keywords: List[str]) -> Dict[str, List[VideoRecord]]:
-        """按关键词搜索最近一天发布的视频，返回 {keyword: [VideoRecord]}。"""
+    def search_recent(self, keywords: List[str], publish_days: int = 1) -> Dict[str, List[VideoRecord]]:
+        """按关键词搜索最近 publish_days 天（1 或 7）发布的作品，返回 {keyword: [VideoRecord]}。"""
 
     def creator_recent_posts(self, sec_uids: Iterable[str], since_ts: int) -> Dict[str, List[VideoRecord]]:
         raise SourceError(f"{self.name} 不支持拉取博主作品")
