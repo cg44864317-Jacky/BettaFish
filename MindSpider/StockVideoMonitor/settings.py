@@ -76,6 +76,10 @@ class MonitorSettings(BaseSettings):
         "06:50", description="计划任务必须在此时间前结束（HH:MM），晚于此时间启动的计划任务直接跳过"
     )
     STOCK_VIDEO_RESERVE_MINUTES: int = Field(10, description="为预警和生成跟踪表预留的分钟数")
+    STOCK_VIDEO_CLEANUP: bool = Field(True, description="每日任务结束后清理临时文件、浏览器缓存、旧日志和旧数据")
+    STOCK_VIDEO_LOG_KEEP_DAYS: int = Field(30, description="每日运行日志保留天数")
+    STOCK_VIDEO_RAW_KEEP_DAYS: int = Field(7, description="MediaCrawler 原始搜索数据保留天数")
+    STOCK_VIDEO_UNFLAGGED_KEEP_DAYS: int = Field(30, description="未被标记跟踪的候选作品记录保留天数")
 
     # ------------------------------------------------------------------ 识别
     STOCK_VIDEO_PREFILTER_BATCH: int = Field(20, description="粗筛时每次让大模型判断多少条视频")

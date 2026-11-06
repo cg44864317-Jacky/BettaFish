@@ -82,6 +82,10 @@ def run_daily(now: Optional[datetime] = None, settings: Optional[MonitorSettings
         logger.exception(f"[跟踪表] 生成失败：{e}")
     if tracking is not None and hasattr(tracking, "client"):
         summary["tikhub_calls"] = tracking.client.calls
+    if s.STOCK_VIDEO_CLEANUP:
+        from .cleanup import run_cleanup
+
+        summary["cleanup_freed_mb"] = round(run_cleanup(now, s).freed_mb, 1)
     if finish_by:
         summary["finished_at"] = datetime.now().isoformat(timespec="seconds")
     return summary

@@ -57,6 +57,13 @@ def cmd_run(args) -> None:
     logger.info("本次运行汇总：\n" + json.dumps(summary, ensure_ascii=False, indent=2, default=str))
 
 
+def cmd_cleanup(_args) -> None:
+    from .cleanup import run_cleanup
+
+    create_tables()
+    run_cleanup()
+
+
 def cmd_track(_args) -> None:
     from .alerts import AlertEngine
     from .notifiers import notify
@@ -183,6 +190,7 @@ def main() -> None:
     ac.add_argument("sec_uids", nargs="+")
     ac.set_defaults(func=cmd_add_creator)
     sub.add_parser("status", help="查看监控概况").set_defaults(func=cmd_status)
+    sub.add_parser("cleanup", help="清理临时文件、浏览器缓存、旧日志和旧数据").set_defaults(func=cmd_cleanup)
     sub.add_parser("douyin-login", help="抖音扫码登录（首次使用或登录失效时运行）").set_defaults(func=cmd_douyin_login)
     st = sub.add_parser("selftest", help="部署自检：数据库、大模型、TikHub、AKShare、内容解析")
     st.add_argument("--no-tikhub", action="store_true", help="跳过 TikHub 检查（避免产生费用）")

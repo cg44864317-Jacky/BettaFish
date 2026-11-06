@@ -670,7 +670,7 @@ def test_daily_report_workbook(settings, tmp_path):
 
 
 def test_scheduled_run_skips_late_start(settings):
-    from MindSpider.StockVideoMonitor.pipeline import finish_deadline, run_daily
+    from StockVideoMonitor.pipeline import finish_deadline, run_daily
 
     late = datetime(2026, 11, 9, 6, 55)
     assert finish_deadline(late, settings) == datetime(2026, 11, 9, 6, 50)
@@ -700,3 +700,40 @@ def test_hard_deadline_defers_remaining_and_lookback_widens(settings):
     disc2 = FakeDiscovery({})
     st2 = DailyDiscovery(disc2, clf, analyzer, FakeTracking(), settings, hot_keywords_fn=lambda n: []).run(day + timedelta(hours=1))
     assert st2.flagged == 2 and st2.lookback_hours == 26 and disc2.publish_days == 1
+
+
+def test_cleanup_files_and_old_rows(settings, tmp_path):
+    import os
+    import time
+    from StockVideoMonitor import cleanup
+
+    media = Path(settings.STOCK_VIDEO_MEDIA_DIR)
+    (media / "123_abc").mkdir(parents=True)
+    (media / "123_abc" / "video.mp4").write_bytes(b"x" * 1000)
+    prof = tmp_path / "browser_data" / "dy_user_data_dir"
+    (prof / "Default" / "Cache").mkdir(parents=True)
+    (prof / "Default" / "Cache" / "data_1").write_bytes(b"x" * 500)
+    (prof / "Default" / "Cookies").write_bytes(b"login")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    old_log, new_log = logs / "stock_video_20260901.log", logs / "stock_video_20261106.log"
+    old_log.write_text("old"); new_log.write_text("new")
+    os.utime(old_log, (time.time() - 40 * 86400,) * 2)
+
+    now = datetime(2026, 11, 6, 6, 0)
+    with mdb.session_scope() as s:
+        for aid, status, days in [("u_old", "none", 40), ("u_new", "none", 5), ("t_old", "expired", 40)]:
+            s.add(DouyinStockVideo(aweme_id=aid, desc="x", discovered_at=now - timedelta(days=days), stage="analyzed",
+                                   is_tracked=status != "none", tracking_status=status, miss_count=0))
+
+    st = cleanup.CleanupStats()
+    cleanup.clean_media_cache(settings, st)
+    cleanup.clean_browser_cache(st, tmp_path / "browser_data")
+    cleanup.clean_logs(settings, st, logs)
+    cleanup.clean_database(settings, now, st)
+    assert not any(media.iterdir())
+    assert not (prof / "Default" / "Cache").exists() and (prof / "Default" / "Cookies").exists()
+    assert not old_log.exists() and new_log.exists()
+    with mdb.session_scope() as s:
+        left = set(s.scalars(select(DouyinStockVideo.aweme_id)))
+    assert left == {"u_new", "t_old"}
