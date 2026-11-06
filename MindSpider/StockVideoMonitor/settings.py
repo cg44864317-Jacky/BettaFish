@@ -116,6 +116,7 @@ class MonitorSettings(BaseSettings):
     STOCK_VIDEO_ALERT_STANCE_SHIFT: float = Field(
         0.4, description="看空占比较过去 7 日变化超过多少（0-1）算观点反转"
     )
+    STOCK_VIDEO_ALERT_WARMUP_DAYS: int = Field(3, description="积累满多少天数据后才启用公司级预警（基线需要历史）")
     STOCK_VIDEO_NOTIFIERS: List[str] = Field(default_factory=lambda: ["log"], description="通知渠道，目前仅 log")
 
 

@@ -183,29 +183,43 @@ class TikHubClient:
     def search_videos(self, keyword: str, pages: int) -> List[VideoRecord]:
         cursor, search_id, backtrace = 0, "", ""
         results: List[VideoRecord] = []
-        for _ in range(max(1, pages)):
-            data = self.request(
-                "POST",
-                SEARCH_PATH,
-                json={
-                    "keyword": keyword,
-                    "cursor": cursor,
-                    "sort_type": "2",  # 最新发布
-                    "publish_time": "1",  # 最近一天
-                    "filter_duration": "0",
-                    "content_type": "0",  # 视频和图文都要
-                    "search_id": search_id,
-                    "backtrace": backtrace,
-                },
-            )
-            results.extend(parse_awemes(data))
+        for page in range(max(1, pages)):
+            try:
+                data = self.request(
+                    "POST",
+                    SEARCH_PATH,
+                    json={
+                        "keyword": keyword,
+                        "cursor": cursor,
+                        "sort_type": "2",  # 最新发布
+                        "publish_time": "1",  # 最近一天
+                        "filter_duration": "0",
+                        "content_type": "0",  # 视频和图文都要
+                        "search_id": search_id,
+                        "backtrace": backtrace,
+                    },
+                )
+            except SourceError as e:
+                if page == 0:
+                    raise
+                # 翻页失败时保留已取到的结果，而不是整个关键词作废
+                logger.warning(f"[TikHub] 「{keyword}」第 {page + 1} 页失败，保留前 {page} 页 {len(results)} 条：{e}")
+                break
+            batch = parse_awemes(data)
+            results.extend(batch)
             has_more = find_key(data, "has_more")
             next_cursor = find_key(data, "cursor")
-            if not has_more or next_cursor in (None, cursor):
+            log_pb = find_key(data, "log_pb")
+            search_id = str(
+                find_key(data, "search_id") or find_key(data, "search_request_id")
+                or (log_pb.get("impr_id") if isinstance(log_pb, dict) else None) or search_id or ""
+            )
+            backtrace = str(find_key(data, "backtrace") or backtrace or "")
+            logger.debug(f"[TikHub] 「{keyword}」第 {page + 1} 页 {len(batch)} 条，has_more={has_more}，"
+                         f"cursor={next_cursor}，search_id={'有' if search_id else '无'}")
+            if not has_more or next_cursor in (None, cursor) or not batch:
                 break
             cursor = int(next_cursor)
-            search_id = find_key(data, "search_id") or search_id
-            backtrace = find_key(data, "backtrace") or backtrace
         return results
 
     # -- 博主作品

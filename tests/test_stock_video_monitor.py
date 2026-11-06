@@ -478,7 +478,8 @@ def test_company_level_alerts(settings):
 
 
 def test_company_alerts_from_db(settings):
-    """5 条新视频同一天讨论同一家公司 → 公司级预警。"""
+    """5 条新视频同一天讨论同一家公司 → 公司级预警（已过预热期）。"""
+    settings.STOCK_VIDEO_ALERT_WARMUP_DAYS = 0
     seed_kb()
     day = datetime(2026, 11, 3, 7, 30)
     ts = int((day - timedelta(hours=2)).timestamp())
@@ -591,3 +592,37 @@ def test_resume_unfinished_and_time_budget(settings):
     CountingAnalyzer.calls = 0
     st2 = DailyDiscovery(disc2, clf, analyzer, FakeTracking(), budget0, hot_keywords_fn=lambda n: []).run(day + timedelta(hours=2))
     assert st2.flagged == 1 and CountingAnalyzer.calls == 0  # 超预算：只用文字判断
+
+
+def test_company_alerts_warmup_and_hot_only(settings):
+    seed_kb()
+    day = datetime(2026, 11, 6, 7, 0)
+    ts = int((day - timedelta(hours=2)).timestamp())
+    # 5 条只通过人气榜名字搜到的茅台视频 + 1 条关键词搜到的
+    disc = FakeDiscovery({"股票": [rec("k1", "股票分析：茅台", ts, sec_uid="c0")],
+                          "茅台": [rec(f"h{i}", f"茅台第{i}弹分析", ts, sec_uid=f"c{i}") for i in range(1, 6)]})
+    tracking = FakeTracking()
+    clf = TwoStageClassifier(matcher_from_kb(), FakeLLM())
+    dd = DailyDiscovery(disc, clf, noop_analyzer(settings), tracking, settings, hot_keywords_fn=lambda n: ["茅台"])
+    dd.run(day)
+    engine = AlertEngine(settings)
+    assert [a for a in engine.evaluate(day.date()) if a.level == "company"] == []  # 预热期内不出公司级预警
+    settings.STOCK_VIDEO_ALERT_WARMUP_DAYS = 0
+    company = [a for a in engine.evaluate(day.date()) if a.level == "company"]
+    assert not any(a.alert_type == "video_surge" for a in company)  # 只计 1 条（人气榜搜到的 5 条不计），未达阈值
+
+
+def test_tikhub_keeps_earlier_pages_when_later_page_fails(settings, monkeypatch):
+    monkeypatch.setattr(th.time, "sleep", lambda *_: None)
+
+    def handler(request):
+        body = json.loads(request.content)
+        if body["cursor"] == 0:
+            return httpx.Response(200, json={"code": 200, "data": {
+                "business_data": [{"data": {"aweme_info": aweme("p1")}}], "cursor": 10, "has_more": 1,
+                "extra": {"search_request_id": "req-1"}}})
+        assert body["search_id"] == "req-1"  # 从 search_request_id 取到翻页用的 search_id
+        return httpx.Response(400, json={"detail": "bad"})
+
+    client = th.TikHubClient(settings, transport=httpx.MockTransport(handler))
+    assert [r.aweme_id for r in client.search_videos("股票", pages=3)] == ["p1"]

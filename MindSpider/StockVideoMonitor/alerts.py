@@ -21,10 +21,10 @@ from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .db import session_scope
-from .models import DouyinStockVideo, DouyinStockVideoCompany, DouyinStockVideoSnapshot, StockVideoAlert, dumps
+from .models import DouyinStockVideo, DouyinStockVideoCompany, DouyinStockVideoSnapshot, StockVideoAlert, dumps, loads_list
 from .settings import MonitorSettings, get_settings
 
 METRICS = ("liked_count", "share_count", "collected_count", "comment_count")
@@ -183,7 +183,13 @@ class AlertEngine:
                 alerts.append(Alert(today, "video", "unavailable", f"跟踪中的视频已不可见（可能被删除或隐藏）：{(v.desc or '')[:30]}（{v.nickname}），涉及 {names}",
                                     "low", aid, detail={"aweme_url": v.aweme_url}))
 
-        # 公司维度汇总
+        # 公司维度汇总。运行天数不足时历史基线不可靠（日均接近 0，任何讨论都像「激增」），先不出公司级预警
+        with session_scope() as s:
+            first_seen = s.scalar(select(func.min(DouyinStockVideo.discovered_at)))
+        history_days = (today - first_seen.date()).days if first_seen else 0
+        if history_days < self.s.STOCK_VIDEO_ALERT_WARMUP_DAYS:
+            logger.info(f"[预警] 已积累 {history_days} 天数据，满 {self.s.STOCK_VIDEO_ALERT_WARMUP_DAYS} 天后才启用公司级预警")
+            return alerts
         comp_videos: Dict[str, Dict[date, int]] = defaultdict(lambda: defaultdict(int))
         comp_inter: Dict[str, Dict[date, float]] = defaultdict(lambda: defaultdict(float))
         comp_stance: Dict[str, Dict[date, Dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
@@ -194,7 +200,10 @@ class AlertEngine:
             deltas = daily_deltas(snaps.get(aid, []))
             for m in ms:
                 comp_name[m.stock_code] = m.stock_name or m.stock_code
-                if d0:
+                # 只通过「人气榜股票名」搜到的作品是我们主动按名字搜来的，计入讨论量会高估热门股，不计数
+                channels = loads_list(v.discovery_channels)
+                hot_only = bool(channels) and all(str(c).startswith("hot:") for c in channels)
+                if d0 and not hot_only:
                     comp_videos[m.stock_code][d0] += 1
                     comp_stance[m.stock_code][d0][m.stance or "neutral"] += 1
                 for d, delta in deltas:
