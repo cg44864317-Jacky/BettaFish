@@ -70,10 +70,15 @@ def cmd_track(_args) -> None:
     generate_report()
 
 
-def cmd_report(_args) -> None:
+def cmd_report(args) -> None:
+    import os
+
     from .report import generate_report
 
-    print(f"跟踪表已生成：{generate_report()}")
+    path = generate_report()
+    print(f"跟踪表已更新：{path}")
+    if args.open and hasattr(os, "startfile"):
+        os.startfile(str(path))  # Windows：用默认程序（Excel/WPS）打开
 
 
 def cmd_alerts(_args) -> None:
@@ -168,7 +173,9 @@ def main() -> None:
 
     sub.add_parser("track", help="只执行跟踪和预警").set_defaults(func=cmd_track)
     sub.add_parser("alerts", help="只重新计算今日预警").set_defaults(func=cmd_alerts)
-    sub.add_parser("report", help="重新生成每日跟踪表（Excel）").set_defaults(func=cmd_report)
+    rp = sub.add_parser("report", help="更新每日跟踪表（Excel）")
+    rp.add_argument("--open", action="store_true", help="生成后直接打开")
+    rp.set_defaults(func=cmd_report)
     ac = sub.add_parser("add-creator", help="手动加入博主（sec_uid 或主页链接）")
     ac.add_argument("sec_uids", nargs="+")
     ac.set_defaults(func=cmd_add_creator)

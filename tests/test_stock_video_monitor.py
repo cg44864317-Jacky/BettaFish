@@ -630,7 +630,7 @@ def test_tikhub_keeps_earlier_pages_when_later_page_fails(settings, monkeypatch)
 
 def test_daily_report_workbook(settings, tmp_path):
     import openpyxl
-    from StockVideoMonitor.report import REPORT_NAME, company_sort_key, generate_report
+    from StockVideoMonitor.report import company_sort_key, generate_report, latest_report, report_name
 
     assert sorted(["中国平安", "比亚迪", "贵州茅台", "宁德时代"], key=company_sort_key) == ["比亚迪", "贵州茅台", "宁德时代", "中国平安"]
     seed_kb()
@@ -647,8 +647,12 @@ def test_daily_report_workbook(settings, tmp_path):
     day1 = day0 + timedelta(days=1)
     DailyTracker(tracking, settings).run(day1)
 
+    first = generate_report(day0.date(), out_dir=tmp_path)
+    assert first.name == report_name(day0.date()) == "抖音上市公司分析视频跟踪_20261106.xlsx"
     path = generate_report(day1.date(), out_dir=tmp_path)
-    assert path.name == REPORT_NAME and (tmp_path / "history" / "跟踪表_20261107.xlsx").exists()
+    # 只保留一份：新日期的文件生成后，旧日期的那份被移除（相当于改名）
+    assert [p.name for p in tmp_path.glob("*.xlsx")] == ["抖音上市公司分析视频跟踪_20261107.xlsx"]
+    assert latest_report(tmp_path) == path and not (tmp_path / "history").exists()
     wb = openpyxl.load_workbook(path)
     assert wb.sheetnames == ["跟踪总表", "每日数据", "公司汇总", "预警记录", "说明"]
     ws = wb["跟踪总表"]

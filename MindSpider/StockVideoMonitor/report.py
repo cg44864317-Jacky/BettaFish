@@ -4,20 +4,19 @@
 
 每次每日任务结束后自动生成，也可手动运行：python -m StockVideoMonitor.main report
 
-文件：E:\\BettaFishApp\\reports\\抖音上市公司分析视频跟踪.xlsx（每天覆盖为最新），
-      另存一份到 reports\\history\\跟踪表_YYYYMMDD.xlsx 便于回看。
+文件：E:\\BettaFishApp\\reports\\抖音上市公司分析视频跟踪_YYYYMMDD.xlsx
+      只保留一份表格，包含全部历史数据；每次运行后更新内容，并把文件名改为当天日期。
 
 工作表：
 - 跟踪总表：每个「公司 × 作品」一行，按公司名称（拼音）排列，含最新点赞/评论/转发/收藏及较上次检查的增量
 - 每日数据：每条作品每天检查一次的数据明细，便于看趋势
 - 公司汇总：每家公司的作品数、观点分布、互动总量和当日增量
-- 预警记录：近 30 天预警
+- 预警记录：全部预警
 - 说明
 """
 
 from __future__ import annotations
 
-import shutil
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -33,7 +32,11 @@ from .models import DouyinStockVideo, DouyinStockVideoCompany, DouyinStockVideoS
 from .settings import PROJECT_ROOT, get_settings
 
 REPORT_DIR = PROJECT_ROOT / "reports"
-REPORT_NAME = "抖音上市公司分析视频跟踪.xlsx"
+REPORT_PREFIX = "抖音上市公司分析视频跟踪"
+
+
+def report_name(day: date) -> str:
+    return f"{REPORT_PREFIX}_{day:%Y%m%d}.xlsx"
 
 STANCE_CN = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}
 BASIS_CN = {"name": "名称", "code": "代码", "product": "产品", "technology": "技术", "brand": "品牌"}
@@ -86,7 +89,7 @@ def collect(today: date) -> dict:
         mentions = list(s.scalars(select(DouyinStockVideoCompany).where(DouyinStockVideoCompany.aweme_id.in_(ids)))) if ids else []
         snaps = list(s.scalars(select(DouyinStockVideoSnapshot).where(DouyinStockVideoSnapshot.aweme_id.in_(ids)))) if ids else []
         alerts = list(s.scalars(
-            select(StockVideoAlert).where(StockVideoAlert.alert_date >= today - timedelta(days=30))
+            select(StockVideoAlert).where(StockVideoAlert.alert_date <= today)
             .order_by(StockVideoAlert.alert_date.desc(), StockVideoAlert.id.desc())
         ))
     by_video: Dict[str, List[DouyinStockVideoSnapshot]] = defaultdict(list)
@@ -284,7 +287,7 @@ def build_workbook(data: dict, today: date, generated_at: datetime):
         "跟踪状态：跟踪中＝标记后 14 天内每天检查；已到期＝满 14 天停止；已不可见＝作品被删除或设为私密。",
         "观点：大模型根据作品内容判断的看多/看空/中性；识别依据：通过公司名称、股票代码、产品或技术识别。",
         "每日数据：每条作品每天的检查记录，可用筛选按公司或作品查看趋势。",
-        "历史版本保存在 reports\\history 文件夹，每天一份。",
+        "本表只有一份，包含全部历史数据；每天运行后更新内容，文件名中的日期即数据截至日期。",
     ]
     ws5.column_dimensions["A"].width = 110
     for i, line in enumerate(notes, 1):
@@ -293,17 +296,32 @@ def build_workbook(data: dict, today: date, generated_at: datetime):
 
 
 def generate_report(today: Optional[date] = None, out_dir: Optional[Path] = None) -> Path:
+    """
+    生成（更新）唯一的跟踪表：写入以当天日期命名的新文件，再删除旧日期的那份，
+    相当于「更新内容 + 改名」。旧文件若正被 Excel 打开而删不掉，下次运行再清理。
+    """
     today = today or date.today()
     out_dir = Path(out_dir or REPORT_DIR)
-    (out_dir / "history").mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     wb = build_workbook(collect(today), today, datetime.now())
-    target = out_dir / REPORT_NAME
+    target = out_dir / report_name(today)
     try:
         wb.save(target)
-    except PermissionError:  # 表格正在 Excel 中打开，换个文件名保存
-        target = out_dir / f"抖音上市公司分析视频跟踪_{datetime.now():%Y%m%d_%H%M}.xlsx"
+    except PermissionError:  # 当天的表格正在 Excel 中打开（同一天重复运行），换个文件名保存
+        target = out_dir / f"{REPORT_PREFIX}_{today:%Y%m%d}_{datetime.now():%H%M}.xlsx"
         wb.save(target)
-        logger.warning(f"[跟踪表] 原文件正被打开，已另存为 {target.name}；关闭 Excel 后下次运行会恢复原文件名")
-    shutil.copyfile(target, out_dir / "history" / f"跟踪表_{today:%Y%m%d}.xlsx")
+        logger.warning(f"[跟踪表] 当天的表格正被打开，已另存为 {target.name}")
+    for old in out_dir.glob(f"{REPORT_PREFIX}*.xlsx"):
+        if old.resolve() == target.resolve():
+            continue
+        try:
+            old.unlink()
+        except OSError:
+            logger.warning(f"[跟踪表] 旧表格 {old.name} 正被打开，暂未删除，下次运行时清理")
     logger.info(f"[跟踪表] 已更新：{target}")
     return target
+
+
+def latest_report(out_dir: Optional[Path] = None) -> Optional[Path]:
+    files = sorted(Path(out_dir or REPORT_DIR).glob(f"{REPORT_PREFIX}*.xlsx"), key=lambda p: p.stat().st_mtime)
+    return files[-1] if files else None
