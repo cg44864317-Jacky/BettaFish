@@ -50,6 +50,12 @@ def run_daily(now: Optional[datetime] = None, settings: Optional[MonitorSettings
     new_alerts = engine.save(engine.evaluate(now.date(), unavailable))
     notify(new_alerts, s)
     summary["alerts"] = len(new_alerts)
+    try:  # 跟踪表生成失败不影响每日任务本身
+        from .report import generate_report
+
+        summary["report"] = str(generate_report(now.date()))
+    except Exception as e:
+        logger.exception(f"[跟踪表] 生成失败：{e}")
     if tracking is not None and hasattr(tracking, "client"):
         summary["tikhub_calls"] = tracking.client.calls
     return summary

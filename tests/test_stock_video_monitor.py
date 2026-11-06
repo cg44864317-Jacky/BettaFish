@@ -626,3 +626,39 @@ def test_tikhub_keeps_earlier_pages_when_later_page_fails(settings, monkeypatch)
 
     client = th.TikHubClient(settings, transport=httpx.MockTransport(handler))
     assert [r.aweme_id for r in client.search_videos("股票", pages=3)] == ["p1"]
+
+
+def test_daily_report_workbook(settings, tmp_path):
+    import openpyxl
+    from StockVideoMonitor.report import REPORT_NAME, company_sort_key, generate_report
+
+    assert sorted(["中国平安", "比亚迪", "贵州茅台", "宁德时代"], key=company_sort_key) == ["比亚迪", "贵州茅台", "宁德时代", "中国平安"]
+    seed_kb()
+    day0 = datetime(2026, 11, 6, 7, 0)
+    ts = int((day0 - timedelta(hours=2)).timestamp())
+    disc = FakeDiscovery({"股票": [rec("v1", "宁王麒麟电池股票分析", ts, likes=500),
+                                   rec("v2", "茅台股票深度分析", ts, sec_uid="u2", likes=900),
+                                   rec("v3", "猫咪日常", ts, sec_uid="u3")]})
+    tracking = FakeTracking()
+    clf = TwoStageClassifier(matcher_from_kb(), FakeLLM())
+    DailyDiscovery(disc, clf, noop_analyzer(settings), tracking, settings, hot_keywords_fn=lambda n: []).run(day0)
+    tracking.data["v1"] = VideoRecord(aweme_id="v1", liked_count=1500, comment_count=20, share_count=9, collected_count=30)
+    tracking.data["v2"] = VideoRecord(aweme_id="v2", liked_count=950, comment_count=11, share_count=5, collected_count=8)
+    day1 = day0 + timedelta(days=1)
+    DailyTracker(tracking, settings).run(day1)
+
+    path = generate_report(day1.date(), out_dir=tmp_path)
+    assert path.name == REPORT_NAME and (tmp_path / "history" / "跟踪表_20261107.xlsx").exists()
+    wb = openpyxl.load_workbook(path)
+    assert wb.sheetnames == ["跟踪总表", "每日数据", "公司汇总", "预警记录", "说明"]
+    ws = wb["跟踪总表"]
+    header = [c.value for c in ws[1]]
+    rows = [dict(zip(header, [c.value for c in r])) for r in ws.iter_rows(min_row=2)]
+    assert [r["公司名称"] for r in rows] == ["贵州茅台", "宁德时代"]  # 按拼音：G < N
+    ning = rows[1]
+    assert (ning["点赞"], ning["点赞日增"], ning["收藏日增"], ning["跟踪状态"]) == (1500, 1000, 22, "跟踪中")
+    assert ning["已跟踪天数"] == 2 and ws.cell(row=3, column=header.index("作品链接") + 1).hyperlink is not None
+    daily = list(wb["每日数据"].iter_rows(min_row=2, values_only=True))
+    assert len(daily) == 4  # 2 条作品 × 2 天
+    summary = {r[1]: r for r in wb["公司汇总"].iter_rows(min_row=2, values_only=True)}
+    assert summary["300750"][2] == 1 and summary["300750"][10] == 1000

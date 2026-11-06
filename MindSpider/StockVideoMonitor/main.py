@@ -11,6 +11,7 @@
     python -m StockVideoMonitor.main add-creator <sec_uid>   # 手动把博主加入博主池
     python -m StockVideoMonitor.main status                  # 查看监控概况
     python -m StockVideoMonitor.main selftest                # 部署自检
+    python -m StockVideoMonitor.main report                  # 重新生成每日跟踪表（Excel）
     python -m StockVideoMonitor.main douyin-login            # 抖音扫码登录（首次或登录失效时）
 """
 
@@ -64,6 +65,15 @@ def cmd_track(_args) -> None:
     stats = DailyTracker(build_tracking()).run()
     engine = AlertEngine()
     notify(engine.save(engine.evaluate(date.today(), stats.unavailable_ids)))
+    from .report import generate_report
+
+    generate_report()
+
+
+def cmd_report(_args) -> None:
+    from .report import generate_report
+
+    print(f"跟踪表已生成：{generate_report()}")
 
 
 def cmd_alerts(_args) -> None:
@@ -158,6 +168,7 @@ def main() -> None:
 
     sub.add_parser("track", help="只执行跟踪和预警").set_defaults(func=cmd_track)
     sub.add_parser("alerts", help="只重新计算今日预警").set_defaults(func=cmd_alerts)
+    sub.add_parser("report", help="重新生成每日跟踪表（Excel）").set_defaults(func=cmd_report)
     ac = sub.add_parser("add-creator", help="手动加入博主（sec_uid 或主页链接）")
     ac.add_argument("sec_uids", nargs="+")
     ac.set_defaults(func=cmd_add_creator)
