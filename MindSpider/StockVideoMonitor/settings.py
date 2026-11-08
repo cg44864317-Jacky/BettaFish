@@ -52,7 +52,7 @@ class MonitorSettings(BaseSettings):
 
     # ------------------------------------------------------------------ 发现新视频
     STOCK_VIDEO_DISCOVERY_SOURCE: str = Field(
-        "mediacrawler", description="关键词搜索用哪个数据源：mediacrawler 或 tikhub；主数据源失败时自动改用另一个"
+        "mediacrawler", description="关键词搜索用哪个数据源：mediacrawler 或 tikhub（主数据源失败时自动改用另一个）；云服务器用 tikhub_only"
     )
     STOCK_VIDEO_SEARCH_KEYWORDS: List[str] = Field(
         default_factory=lambda: [

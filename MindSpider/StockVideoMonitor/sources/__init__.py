@@ -78,6 +78,8 @@ def build_discovery(settings: Optional[MonitorSettings] = None) -> FallbackDisco
     s = settings or get_settings()
     tikhub, mc = _try_tikhub(s), None
     primary = (s.STOCK_VIDEO_DISCOVERY_SOURCE or "mediacrawler").lower()
+    if primary == "tikhub_only":  # 云服务器：没有桌面浏览器，不能扫码登录抖音，只用 TikHub
+        return FallbackDiscovery([x for x in [tikhub] if x is not None])
     if primary == "mediacrawler":
         mc = _try_mediacrawler(s)
         order = [mc, tikhub]
