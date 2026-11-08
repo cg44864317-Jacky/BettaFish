@@ -737,3 +737,21 @@ def test_cleanup_files_and_old_rows(settings, tmp_path):
     with mdb.session_scope() as s:
         left = set(s.scalars(select(DouyinStockVideo.aweme_id)))
     assert left == {"u_new", "t_old"}
+
+
+def test_hot_stock_names_fall_back_to_own_data(settings, monkeypatch):
+    from StockVideoMonitor import knowledge_base as kb
+    from StockVideoMonitor.models import DouyinStockVideoCompany
+
+    def boom(n):
+        raise ConnectionError("Connection reset by peer")
+
+    monkeypatch.setattr(kb, "_hot_from_eastmoney", boom)
+    monkeypatch.setattr(kb, "_hot_from_xueqiu", boom)
+    ts = int(datetime.now().timestamp())
+    with mdb.session_scope() as s:
+        for i, name in enumerate(["贵州茅台", "贵州茅台", "宁德时代"]):
+            s.add(DouyinStockVideoCompany(aweme_id=f"h{i}", stock_code="600519" if name == "贵州茅台" else "300750",
+                                          stock_name=name, video_create_time=ts))
+    assert kb.fetch_hot_stock_names(5) == ["贵州茅台", "宁德时代"]
+    assert kb.HOT_SOURCE_USED == "近 7 天被标记最多的公司"

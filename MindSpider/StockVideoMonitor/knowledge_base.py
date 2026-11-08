@@ -332,16 +332,68 @@ def enrich_with_llm(llm: JSONLLM, batch_size: int = 15, limit: Optional[int] = N
     return done
 
 
+HOT_SOURCE_USED: Optional[str] = None  # 最近一次人气股名单来自哪里（自检显示用）
+
+
+def _hot_from_eastmoney(top_n: int) -> List[str]:
+    import akshare as ak
+
+    df = ak.stock_hot_rank_em()
+    col = _col(df, "股票名称", "名称")
+    return [str(x).strip() for x in df[col].head(top_n)] if col else []
+
+
+def _hot_from_xueqiu(top_n: int) -> List[str]:
+    import akshare as ak
+
+    df = ak.stock_hot_follow_xq(symbol="最热门")
+    col = _col(df, "股票简称", "名称")
+    code_col = _col(df, "股票代码", "代码")
+    if not col:
+        return []
+    if code_col:  # 只要 A 股（SH/SZ/BJ 开头）
+        df = df[df[code_col].astype(str).str.upper().str.match(r"^(SH|SZ|BJ)")]
+    return [str(x).strip() for x in df[col].head(top_n)]
+
+
+def _hot_from_own_data(top_n: int, days: int = 7) -> List[str]:
+    """外部人气榜都取不到时（如海外服务器访问东方财富被拒），用最近几天被标记最多的公司。"""
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import func, select
+
+    from .db import session_scope
+    from .models import DouyinStockVideoCompany
+
+    since = int((datetime.now() - timedelta(days=days)).timestamp())
+    with session_scope() as s:
+        rows = s.execute(
+            select(DouyinStockVideoCompany.stock_name, func.count().label("n"))
+            .where(DouyinStockVideoCompany.video_create_time >= since, DouyinStockVideoCompany.stock_name.isnot(None))
+            .group_by(DouyinStockVideoCompany.stock_name)
+            .order_by(func.count().desc())
+            .limit(top_n)
+        ).all()
+    return [r[0] for r in rows]
+
+
 def fetch_hot_stock_names(top_n: int) -> List[str]:
-    """东方财富人气榜前 N 名的股票简称，用作当天的动态搜索词。"""
+    """当天的人气股简称，用作动态搜索词：东方财富人气榜 → 雪球关注榜 → 本库近 7 天被标记最多的公司。"""
+    global HOT_SOURCE_USED
+    HOT_SOURCE_USED = None
     if top_n <= 0:
         return []
-    try:
-        import akshare as ak
-
-        df = ak.stock_hot_rank_em()
-        col = _col(df, "股票名称", "名称")
-        return [str(x).strip() for x in df[col].head(top_n)] if col else []
-    except Exception as e:
-        logger.warning(f"[发现] 人气榜获取失败，跳过动态关键词：{e}")
-        return []
+    sources = [("东方财富人气榜", _hot_from_eastmoney), ("东方财富人气榜", _hot_from_eastmoney),
+               ("雪球关注榜", _hot_from_xueqiu), ("近 7 天被标记最多的公司", _hot_from_own_data)]
+    for label, fn in sources:
+        try:
+            names = [n for n in fn(top_n) if n]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[发现] {label}获取失败：{str(e)[:150]}")
+            continue
+        if names:
+            HOT_SOURCE_USED = label
+            logger.info(f"[发现] 动态关键词来自{label}：{len(names)} 个")
+            return names
+    logger.warning("[发现] 人气股名单都取不到，本次跳过动态关键词")
+    return []

@@ -61,10 +61,13 @@ def check_tikhub() -> str:
 
 
 def check_akshare() -> str:
-    from .knowledge_base import fetch_company_list
+    """每日运行只用到人气股名单（有备用来源）；知识库已建好时不需要公司列表接口。"""
+    from . import knowledge_base as kb
 
-    companies = fetch_company_list()
-    return f"获取到 {len(companies)} 家 A 股公司"
+    names = kb.fetch_hot_stock_names(5)
+    if not names:
+        raise RuntimeError("东方财富、雪球和本库数据都取不到人气股名单")
+    return f"人气股名单来自{kb.HOT_SOURCE_USED}：{'、'.join(names)}"
 
 
 def check_media() -> str:
@@ -98,10 +101,12 @@ def run_selftest(include_tikhub: bool = True) -> bool:
         else:
             checks.append(("TikHub", False, "未配置 TIKHUB_API_KEY\n      → 在 .env 中填写 TIKHUB_API_KEY"))
     checks += [
-        _check("AKShare", check_akshare, "检查网络；AKShare 需要访问东方财富/同花顺等网站"),
+        _check("人气股名单", check_akshare, "检查网络；数据库里还没有标记过的视频时，至少要能访问东方财富或雪球"),
         _check("内容解析", check_media, "检查 STOCK_VIDEO_OCR_BACKEND / STOCK_VIDEO_ASR_BACKEND 配置和相应依赖"),
-        _check("MediaCrawler", check_mediacrawler, "在 BettaFish 目录运行 git submodule update --init --recursive"),
     ]
+    if (s.STOCK_VIDEO_DISCOVERY_SOURCE or "").lower() != "tikhub_only":  # 云服务器只用 TikHub，不检查 MediaCrawler
+        checks.append(_check("MediaCrawler", check_mediacrawler,
+                             "在 BettaFish 目录运行 git submodule update --init --recursive"))
     print("\n========== 部署自检 ==========")
     for name, ok, detail in checks:
         print(f"[{'通过' if ok else '失败'}] {name}：{detail}")
