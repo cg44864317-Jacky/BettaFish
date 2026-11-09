@@ -65,6 +65,39 @@ _ADDED_COLUMNS = {
 }
 
 
+# 已有表需要加长的列（视频号作者 username 约 94 个字符，原先按抖音 uid 设的 64 不够）
+_WIDENED_COLUMNS = {
+    "douyin_stock_video": {"author_uid": 255, "sec_uid": 255},
+    "douyin_finance_creator": {"author_uid": 255, "sec_uid": 255},
+}
+
+
+def _widen_columns(engine: Engine) -> None:
+    from sqlalchemy import inspect, text
+
+    dialect = engine.dialect.name
+    if dialect not in ("postgresql", "mysql", "mariadb"):
+        return  # SQLite 不限制 VARCHAR 长度
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    for table, cols in _WIDENED_COLUMNS.items():
+        if table not in tables:
+            continue
+        current = {c["name"]: getattr(c["type"], "length", None) for c in insp.get_columns(table)}
+        for col, length in cols.items():
+            if current.get(col) is not None and current[col] < length:
+                ddl = (f"ALTER TABLE {table} ALTER COLUMN {col} TYPE VARCHAR({length})" if dialect == "postgresql"
+                       else f"ALTER TABLE {table} MODIFY {col} VARCHAR({length})")
+                with engine.begin() as conn:
+                    conn.execute(text(ddl))
+    # 因列太短而保存失败的视频号作品，重新放回待识别（下次运行自动重试）
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE douyin_stock_video SET stage = 'finance', error_message = NULL "
+            "WHERE stage = 'failed' AND error_message LIKE '%value too long%'"
+        ))
+
+
 def create_tables(engine: Optional[Engine] = None) -> None:
     from sqlalchemy import inspect, text
 
@@ -79,3 +112,4 @@ def create_tables(engine: Optional[Engine] = None) -> None:
             if col not in existing:
                 with engine.begin() as conn:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
+    _widen_columns(engine)

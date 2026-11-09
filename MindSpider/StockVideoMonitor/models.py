@@ -76,8 +76,8 @@ class DouyinStockVideo(MonitorBase):
     desc: Mapped[Optional[str]] = mapped_column(Text)
     hashtags: Mapped[Optional[str]] = mapped_column(Text)  # JSON 数组
     create_time: Mapped[Optional[int]] = mapped_column(BigInteger)  # 发布时间，秒级时间戳
-    author_uid: Mapped[Optional[str]] = mapped_column(String(64))
-    sec_uid: Mapped[Optional[str]] = mapped_column(String(128), index=True)
+    author_uid: Mapped[Optional[str]] = mapped_column(String(255))
+    sec_uid: Mapped[Optional[str]] = mapped_column(String(255), index=True)
     nickname: Mapped[Optional[str]] = mapped_column(String(255))
     follower_count: Mapped[Optional[int]] = mapped_column(BigInteger)
     aweme_url: Mapped[Optional[str]] = mapped_column(Text)
@@ -148,9 +148,9 @@ class DouyinStockVideoSnapshot(MonitorBase):
 class DouyinFinanceCreator(MonitorBase):
     __tablename__ = "douyin_finance_creator"
 
-    sec_uid: Mapped[str] = mapped_column(String(128), primary_key=True)  # 视频号为 finder username
+    sec_uid: Mapped[str] = mapped_column(String(255), primary_key=True)  # 视频号为 finder username
     platform: Mapped[str] = mapped_column(String(16), default="douyin", index=True)
-    author_uid: Mapped[Optional[str]] = mapped_column(String(64))
+    author_uid: Mapped[Optional[str]] = mapped_column(String(255))
     nickname: Mapped[Optional[str]] = mapped_column(String(255))
     follower_count: Mapped[Optional[int]] = mapped_column(BigInteger)
     flagged_video_count: Mapped[int] = mapped_column(Integer, default=0)
