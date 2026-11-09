@@ -864,3 +864,21 @@ def test_wechat_end_to_end(settings, tmp_path, monkeypatch):
     assert "推荐" in header and "收藏" not in header
     assert {r["公司名称"] for r in rows} == {"宁德时代", "贵州茅台"} and all(r["点赞日增"] == 5000 for r in rows)
     assert openpyxl.load_workbook(dy)["跟踪总表"].max_row == 1  # 抖音表里没有视频号作品
+
+
+def test_tikhub_retries_failed_keywords_once_more(settings, monkeypatch):
+    monkeypatch.setattr(th.time, "sleep", lambda *_: None)
+    tries = {"价值投资": 0}
+
+    class Client:
+        calls = 0
+
+        def search_videos(self, kw, pages, publish_days=1):
+            if kw == "价值投资":
+                tries[kw] += 1
+                if tries[kw] == 1:
+                    raise th.SourceError("HTTP 400")
+            return [rec(f"{kw}1", kw, 1)]
+
+    out = th.TikHubSource(client=Client(), settings=settings).search_recent(["股票", "价值投资"])
+    assert set(out) == {"股票", "价值投资"} and tries["价值投资"] == 2

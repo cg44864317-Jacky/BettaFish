@@ -27,6 +27,7 @@ SEARCH_PATH = "/api/v1/douyin/search/fetch_video_search_v2"
 USER_POSTS_PATH = "/api/v1/douyin/app/v3/fetch_user_post_videos"
 MULTI_VIDEO_PATH = "/api/v1/douyin/app/v3/fetch_multi_video_v2"
 MULTI_VIDEO_BATCH = 50
+RETRY_ROUND_WAIT = 30  # 秒
 
 
 # ---------------------------------------------------------------------- 响应解析
@@ -264,12 +265,23 @@ class TikHubSource(DiscoverySource, TrackingSource):
 
     def search_recent(self, keywords: List[str], publish_days: int = 1) -> Dict[str, List[VideoRecord]]:
         out: Dict[str, List[VideoRecord]] = {}
+        failed: List[str] = []
         for kw in keywords:
             try:
                 out[kw] = self.client.search_videos(kw, self.s.STOCK_VIDEO_SEARCH_PAGES, publish_days)
                 logger.info(f"[TikHub] 关键词「{kw}」搜到 {len(out[kw])} 条")
             except SourceError as e:
+                failed.append(kw)
                 logger.warning(f"[TikHub] 关键词「{kw}」搜索失败：{e}")
+        if failed and out:  # TikHub 偶发失败（400「请重试，不扣费」），隔一会儿对失败的词再试一轮
+            logger.info(f"[TikHub] {len(failed)} 个关键词失败，{RETRY_ROUND_WAIT} 秒后再试一次")
+            time.sleep(RETRY_ROUND_WAIT)
+            for kw in failed:
+                try:
+                    out[kw] = self.client.search_videos(kw, self.s.STOCK_VIDEO_SEARCH_PAGES, publish_days)
+                    logger.info(f"[TikHub] 关键词「{kw}」重试成功，搜到 {len(out[kw])} 条")
+                except SourceError as e:
+                    logger.warning(f"[TikHub] 关键词「{kw}」再次失败，本次跳过：{e}")
         if keywords and not out:
             raise SourceError("TikHub 所有关键词搜索均失败")
         return out

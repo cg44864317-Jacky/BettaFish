@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Dict, Iterable, List, Optional
 
 from loguru import logger
@@ -32,7 +33,7 @@ from sqlalchemy import select
 
 from ..settings import MonitorSettings, get_settings
 from .base import DiscoverySource, SourceError, TrackingSource, VideoRecord
-from .tikhub import TikHubClient, find_key
+from .tikhub import RETRY_ROUND_WAIT, TikHubClient, find_key
 
 SEARCH_PATH = "/api/v1/wechat_search/v2/fetch_search_videos"
 DETAIL_PATH = "/api/v1/wechat_channels/v2/fetch_video_detail"
@@ -198,12 +199,22 @@ class WechatChannelsSource(DiscoverySource, TrackingSource):
     def search_recent(self, keywords: List[str], publish_days: int = 1) -> Dict[str, List[VideoRecord]]:
         out: Dict[str, List[VideoRecord]] = {}
         pages = self.s.STOCK_VIDEO_WECHAT_SEARCH_PAGES
+        failed: List[str] = []
         for kw in keywords:
             try:
                 out[kw] = self.search_keyword(kw, pages, publish_days)
                 logger.info(f"[视频号] 关键词「{kw}」搜到 {len(out[kw])} 条")
             except SourceError as e:
+                failed.append(kw)
                 logger.warning(f"[视频号] 关键词「{kw}」搜索失败：{e}")
+        if failed and out:  # 偶发失败隔一会儿再试一轮
+            time.sleep(RETRY_ROUND_WAIT)
+            for kw in failed:
+                try:
+                    out[kw] = self.search_keyword(kw, pages, publish_days)
+                    logger.info(f"[视频号] 关键词「{kw}」重试成功，搜到 {len(out[kw])} 条")
+                except SourceError as e:
+                    logger.warning(f"[视频号] 关键词「{kw}」再次失败，本次跳过：{e}")
         if keywords and not out:
             raise SourceError("视频号所有关键词搜索均失败")
         return out
