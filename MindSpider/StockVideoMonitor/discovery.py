@@ -26,6 +26,7 @@ from .models import (
 )
 from .settings import MonitorSettings, get_settings
 from .sources import DiscoverySource, SourceError, TrackingSource, VideoRecord
+from .sources.base import PLATFORM_CN
 
 
 @dataclass
@@ -78,7 +79,9 @@ class DailyDiscovery:
         tracking: Optional[TrackingSource] = None,
         settings: Optional[MonitorSettings] = None,
         hot_keywords_fn=fetch_hot_stock_names,
+        platform: str = "douyin",
     ):
+        self.platform = platform
         self.discovery = discovery
         self.classifier = classifier
         self.analyzer = analyzer
@@ -90,7 +93,8 @@ class DailyDiscovery:
     def lookback_hours(self, now: datetime) -> int:
         """正常为 26 小时；距上次发现超过这个时间（漏跑）就自动扩大窗口，最多 72 小时。"""
         with session_scope() as s:
-            last = s.scalar(select(func.max(DouyinStockVideo.discovered_at)))
+            last = s.scalar(select(func.max(DouyinStockVideo.discovered_at))
+                            .where(DouyinStockVideo.platform == self.platform))
         base = self.s.STOCK_VIDEO_LOOKBACK_HOURS
         if not last:
             return base
@@ -106,8 +110,11 @@ class DailyDiscovery:
         publish_days = 1 if hours <= self.s.STOCK_VIDEO_LOOKBACK_HOURS else 7
         groups: Dict[str, List[VideoRecord]] = {}
 
-        base_kw = list(dict.fromkeys(self.s.STOCK_VIDEO_SEARCH_KEYWORDS))
-        hot_kw = [k for k in self.hot_keywords_fn(self.s.STOCK_VIDEO_HOT_STOCK_KEYWORDS) if k not in base_kw]
+        wechat = self.platform == "wechat"
+        base_kw = list(dict.fromkeys((self.s.STOCK_VIDEO_WECHAT_SEARCH_KEYWORDS if wechat else None)
+                                     or self.s.STOCK_VIDEO_SEARCH_KEYWORDS))
+        n_hot = self.s.STOCK_VIDEO_WECHAT_HOT_STOCK_KEYWORDS if wechat else self.s.STOCK_VIDEO_HOT_STOCK_KEYWORDS
+        hot_kw = [k for k in self.hot_keywords_fn(n_hot) if k not in base_kw]
         try:
             by_kw = self.discovery.search_recent(base_kw + hot_kw, publish_days)
             stats.source_used = getattr(self.discovery, "used", None) or self.discovery.name
@@ -121,9 +128,9 @@ class DailyDiscovery:
                 creators = list(
                     s.scalars(
                         select(DouyinFinanceCreator.sec_uid)
-                        .where(DouyinFinanceCreator.enabled.is_(True))
+                        .where(DouyinFinanceCreator.enabled.is_(True), DouyinFinanceCreator.platform == self.platform)
                         .order_by(DouyinFinanceCreator.last_flagged_at.desc())
-                        .limit(self.s.STOCK_VIDEO_CREATOR_POOL_MAX)
+                        .limit(self.s.STOCK_VIDEO_WECHAT_CREATOR_POOL_MAX if wechat else self.s.STOCK_VIDEO_CREATOR_POOL_MAX)
                     )
                 )
             if creators:
@@ -155,7 +162,7 @@ class DailyDiscovery:
                     continue
                 s.add(
                     DouyinStockVideo(
-                        aweme_id=aid, title=r.title, desc=r.desc, hashtags=dumps(r.hashtags),
+                        aweme_id=aid, platform=self.platform, object_id=r.object_id, export_id=r.export_id, title=r.title, desc=r.desc, hashtags=dumps(r.hashtags),
                         create_time=r.create_time, author_uid=r.author_uid, sec_uid=r.sec_uid, nickname=r.nickname,
                         follower_count=r.follower_count, aweme_url=r.aweme_url, video_url=r.video_url,
                         cover_url=r.cover_url, duration_ms=r.duration_ms, aweme_type=r.aweme_type,
@@ -192,7 +199,7 @@ class DailyDiscovery:
                     + (f"；另有 {len(resumed)} 条上次未完成精判，继续处理" if resumed else ""))
 
         fresh: Dict[str, VideoRecord] = {}
-        if self.tracking and finance_ids:  # 播放地址几小时就会过期，解析前刷新一次，顺便拿到最新互动数
+        if self.tracking and finance_ids and getattr(self.tracking, "refresh_before_judge", True):  # 播放地址几小时就会过期，解析前刷新一次，顺便拿到最新互动数
             try:
                 fresh = self.tracking.fetch_videos(finance_ids)
             except SourceError as e:
@@ -233,7 +240,8 @@ class DailyDiscovery:
         with session_scope() as s:
             return list(s.scalars(
                 select(DouyinStockVideo.aweme_id).where(
-                    DouyinStockVideo.stage.in_(["new", "finance"]), DouyinStockVideo.discovered_at >= since
+                    DouyinStockVideo.stage.in_(["new", "finance"]), DouyinStockVideo.discovered_at >= since,
+                    DouyinStockVideo.platform == self.platform,
                 )
             ))
 
@@ -244,10 +252,14 @@ class DailyDiscovery:
             video_url = (fresh.video_url if fresh else None) or row.video_url
             image_urls = (fresh.image_urls if fresh else None) or loads_list(row.image_urls)
             is_image = row.is_image_post or bool(fresh and fresh.is_image_post)
+            cover_url = row.cover_url
         asr_text, ocr_text = "", ""
         try:
             if skip_media:
                 pass
+            elif self.platform == "wechat":  # 视频号视频是加密的，识别封面（图文则识别全部图片）上的文字
+                pics = image_urls if is_image and image_urls else [u for u in [cover_url] if u]
+                ocr_text = self.analyzer.analyze_images(aid, pics) if pics else ""
             elif is_image:
                 asr_text, ocr_text = "", self.analyzer.analyze_images(aid, image_urls)
             else:
@@ -255,10 +267,20 @@ class DailyDiscovery:
         except Exception as e:  # 解析失败不影响用文字判断
             logger.warning(f"[识别] {aid} 语音/画面解析失败，仅用文字判断：{e}")
         result = self.classifier.judge(text, asr_text, ocr_text)
+        if result.is_company_analysis and fresh is None and self.tracking and getattr(self.tracking, "fetch_on_flag", False):
+            try:  # 视频号：标记后再查一次详情，拿到作者 username（每日跟踪要用）和当前互动数
+                fresh = self.tracking.fetch_videos([aid]).get(aid)
+            except SourceError as e:
+                logger.warning(f"[识别] {aid} 查询详情失败，明天跟踪时再补：{e}")
 
         with session_scope() as s:
             row = s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == aid))
             if fresh:
+                for attr in ("sec_uid", "author_uid", "object_id", "export_id", "nickname", "follower_count", "cover_url"):
+                    if getattr(fresh, attr, None) and not getattr(row, attr, None):
+                        setattr(row, attr, getattr(fresh, attr))
+                if fresh.desc and len(fresh.desc) > len(row.desc or ""):  # 视频号搜索结果的文案可能被截断
+                    row.desc = fresh.desc
                 row.video_url = fresh.video_url or row.video_url
                 if fresh.image_urls:
                     row.image_urls = dumps(fresh.image_urls)
@@ -293,7 +315,7 @@ class DailyDiscovery:
                 c = s.get(DouyinFinanceCreator, row.sec_uid)
                 if c is None:
                     c = DouyinFinanceCreator(
-                        sec_uid=row.sec_uid, author_uid=row.author_uid, nickname=row.nickname,
+                        sec_uid=row.sec_uid, platform=self.platform, author_uid=row.author_uid, nickname=row.nickname,
                         follower_count=row.follower_count, flagged_video_count=0, first_seen_at=now,
                         enabled=True, added_by="auto",
                     )
@@ -312,7 +334,7 @@ class DailyDiscovery:
         self.store_new(records, now, stats)
         self.classify(self.pending_ids(now), now, stats, hard_deadline)  # 含本次新增，以及上次中断未完成的
         logger.info(
-            f"[发现] 完成，用时 {time.time() - t0:.0f}s：候选 {stats.candidates}，新增 {stats.new_videos}，"
+            f"[发现·{PLATFORM_CN.get(self.platform, self.platform)}] 完成，用时 {time.time() - t0:.0f}s：候选 {stats.candidates}，新增 {stats.new_videos}，"
             f"股票相关 {stats.finance}，标记为上市公司分析 {stats.flagged}，失败 {stats.failed}"
             + (f"，留到下次 {stats.deferred}" if stats.deferred else "")
         )

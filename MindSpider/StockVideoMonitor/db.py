@@ -57,7 +57,12 @@ def session_scope() -> Iterator[Session]:
 
 
 # 已有表新增的列（create_all 不会给已存在的表加列），按需补上
-_ADDED_COLUMNS = {"a_share_company": {"ambiguous_terms": "TEXT"}}
+_ADDED_COLUMNS = {
+    "a_share_company": {"ambiguous_terms": "TEXT"},
+    "douyin_stock_video": {"platform": "VARCHAR(16) DEFAULT 'douyin'", "object_id": "VARCHAR(64)", "export_id": "TEXT"},
+    "douyin_finance_creator": {"platform": "VARCHAR(16) DEFAULT 'douyin'"},
+    "stock_video_alert": {"platform": "VARCHAR(16) DEFAULT 'douyin'"},
+}
 
 
 def create_tables(engine: Optional[Engine] = None) -> None:

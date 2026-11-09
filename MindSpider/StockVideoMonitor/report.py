@@ -4,8 +4,8 @@
 
 每次每日任务结束后自动生成，也可手动运行：python -m StockVideoMonitor.main report
 
-文件：E:\\BettaFishApp\\reports\\抖音上市公司分析视频跟踪_YYYYMMDD.xlsx
-      只保留一份表格，包含全部历史数据；每次运行后更新内容，并把文件名改为当天日期。
+文件：reports/抖音上市公司分析视频跟踪_YYYYMMDD.xlsx、reports/视频号上市公司分析视频跟踪_YYYYMMDD.xlsx
+      每个平台只保留一份表格，包含全部历史数据；每次运行后更新内容，并把文件名改为当天日期。
 
 工作表：
 - 跟踪总表：每个「公司 × 作品」一行，按公司名称（拼音）排列，含最新点赞/评论/转发/收藏及较上次检查的增量
@@ -33,10 +33,13 @@ from .settings import PROJECT_ROOT, get_settings
 
 REPORT_DIR = PROJECT_ROOT / "reports"
 REPORT_PREFIX = "抖音上市公司分析视频跟踪"
+REPORT_PREFIXES = {"douyin": REPORT_PREFIX, "wechat": "视频号上市公司分析视频跟踪"}
+# 各平台四项互动数的名称：视频号不公开收藏数，collected_count 列存的是「推荐」（爱心）数
+METRIC_LABELS = {"douyin": ("点赞", "评论", "转发", "收藏"), "wechat": ("点赞", "评论", "转发", "推荐")}
 
 
-def report_name(day: date) -> str:
-    return f"{REPORT_PREFIX}_{day:%Y%m%d}.xlsx"
+def report_name(day: date, platform: str = "douyin") -> str:
+    return f"{REPORT_PREFIXES[platform]}_{day:%Y%m%d}.xlsx"
 
 STANCE_CN = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}
 BASIS_CN = {"name": "名称", "code": "代码", "product": "产品", "technology": "技术", "brand": "品牌"}
@@ -82,14 +85,15 @@ def _metrics(snaps: List[DouyinStockVideoSnapshot]) -> VideoMetrics:
     return VideoMetrics(series[-1][1], last_delta, series[-1][0], daily)
 
 
-def collect(today: date) -> dict:
+def collect(today: date, platform: str = "douyin") -> dict:
     with session_scope() as s:
-        videos = {v.aweme_id: v for v in s.scalars(select(DouyinStockVideo).where(DouyinStockVideo.is_tracked.is_(True)))}
+        videos = {v.aweme_id: v for v in s.scalars(select(DouyinStockVideo).where(
+            DouyinStockVideo.is_tracked.is_(True), DouyinStockVideo.platform == platform))}
         ids = list(videos)
         mentions = list(s.scalars(select(DouyinStockVideoCompany).where(DouyinStockVideoCompany.aweme_id.in_(ids)))) if ids else []
         snaps = list(s.scalars(select(DouyinStockVideoSnapshot).where(DouyinStockVideoSnapshot.aweme_id.in_(ids)))) if ids else []
         alerts = list(s.scalars(
-            select(StockVideoAlert).where(StockVideoAlert.alert_date <= today)
+            select(StockVideoAlert).where(StockVideoAlert.alert_date <= today, StockVideoAlert.platform == platform)
             .order_by(StockVideoAlert.alert_date.desc(), StockVideoAlert.id.desc())
         ))
     by_video: Dict[str, List[DouyinStockVideoSnapshot]] = defaultdict(list)
@@ -168,10 +172,12 @@ def _write_sheet(ws, headers: List[Tuple[str, int]], rows: List[list], st, *, nu
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(rows) + 1}"
 
 
-def build_workbook(data: dict, today: date, generated_at: datetime):
+def build_workbook(data: dict, today: date, generated_at: datetime, platform: str = "douyin"):
     from openpyxl import Workbook
 
     st = _styles()
+    L, C, S, F = METRIC_LABELS.get(platform, METRIC_LABELS["douyin"])  # 点赞 评论 转发 收藏/推荐
+    url_of = (lambda v: v.aweme_url) if platform == "douyin" else (lambda v: None)
     videos, metrics = data["videos"], data["metrics"]
     alerted_videos = {a.aweme_id for a in data["alerts"] if a.alert_date == today and a.aweme_id}
     alerted_companies = {a.stock_code for a in data["alerts"] if a.alert_date == today and a.stock_code}
@@ -192,8 +198,8 @@ def build_workbook(data: dict, today: date, generated_at: datetime):
     ws.title = "跟踪总表"
     headers = [("公司名称", 12), ("股票代码", 9), ("观点", 6), ("识别依据", 8), ("作品标题/文案", 42), ("类型", 6),
                ("博主", 14), ("粉丝数", 11), ("发布时间", 16), ("标记日期", 11), ("跟踪状态", 9), ("已跟踪天数", 9),
-               ("最近检查", 11), ("点赞", 10), ("评论", 9), ("转发", 9), ("收藏", 9),
-               ("点赞日增", 10), ("评论日增", 9), ("转发日增", 9), ("收藏日增", 9),
+               ("最近检查", 11), (L, 10), (C, 9), (S, 9), (F, 9),
+               (f"{L}日增", 10), (f"{C}日增", 9), (f"{S}日增", 9), (f"{F}日增", 9),
                ("今日预警", 14), ("原文证据", 36), ("作品链接", 8)]
     rows, highlight = [], set()
     track_days = get_settings().STOCK_VIDEO_TRACK_DAYS
@@ -212,7 +218,7 @@ def build_workbook(data: dict, today: date, generated_at: datetime):
             mt.latest["liked_count"], mt.latest["comment_count"], mt.latest["share_count"], mt.latest["collected_count"],
             *(round(mt.delta[k]) if mt.delta[k] is not None else None
               for k in ("liked_count", "comment_count", "share_count", "collected_count")),
-            warn or None, _clip(m.evidence, 120), v.aweme_url,
+            warn or None, _clip(m.evidence, 120), url_of(v),
         ])
     _write_sheet(ws, headers, rows, st, number_cols={7, 13, 14, 15, 16}, delta_cols={17, 18, 19, 20},
                  link_col=23, highlight_rows=highlight, status_col=10, wrap_cols={4, 22})
@@ -220,8 +226,8 @@ def build_workbook(data: dict, today: date, generated_at: datetime):
     # ---- 每日数据
     ws2 = wb.create_sheet("每日数据")
     h2 = [("公司名称", 12), ("股票代码", 9), ("作品", 34), ("博主", 14), ("检查日期", 11),
-          ("点赞", 10), ("评论", 9), ("转发", 9), ("收藏", 9),
-          ("点赞日增", 10), ("评论日增", 9), ("转发日增", 9), ("收藏日增", 9), ("作品链接", 8)]
+          (L, 10), (C, 9), (S, 9), (F, 9),
+          (f"{L}日增", 10), (f"{C}日增", 9), (f"{S}日增", 9), (f"{F}日增", 9), ("作品链接", 8)]
     rows2 = []
     for m in mentions:
         v, mt = videos[m.aweme_id], metrics[m.aweme_id]
@@ -230,7 +236,7 @@ def build_workbook(data: dict, today: date, generated_at: datetime):
                 m.stock_name, m.stock_code, _clip(v.desc or v.title, 40), v.nickname, d,
                 vals["liked_count"], vals["comment_count"], vals["share_count"], vals["collected_count"],
                 *((round(delta[k]) if delta else None) for k in ("liked_count", "comment_count", "share_count", "collected_count")),
-                v.aweme_url,
+                url_of(v),
             ])
     _write_sheet(ws2, h2, rows2, st, number_cols={5, 6, 7, 8}, delta_cols={9, 10, 11, 12}, link_col=13)
 
@@ -255,8 +261,8 @@ def build_workbook(data: dict, today: date, generated_at: datetime):
             a["d_collected"] += round(mt.delta["collected_count"] or 0)
             a["d_shared"] += round(mt.delta["share_count"] or 0)
     h3 = [("公司名称", 12), ("股票代码", 9), ("跟踪中作品", 10), ("今日新增作品", 11), ("看多", 6), ("看空", 6), ("中性", 6),
-          ("累计点赞", 11), ("累计收藏", 10), ("累计转发", 10), ("今日点赞增量", 12), ("今日收藏增量", 12),
-          ("今日转发增量", 12), ("今日预警", 16)]
+          (f"累计{L}", 11), (f"累计{F}", 10), (f"累计{S}", 10), (f"今日{L}增量", 12), (f"今日{F}增量", 12),
+          (f"今日{S}增量", 12), ("今日预警", 16)]
     rows3, hl3 = [], set()
     for code, a in sorted(agg.items(), key=lambda kv: (company_sort_key(kv[1]["name"] or ""), kv[0])):
         if code in alerted_companies:
@@ -272,7 +278,7 @@ def build_workbook(data: dict, today: date, generated_at: datetime):
     h4 = [("日期", 11), ("级别", 6), ("类型", 10), ("严重程度", 8), ("股票代码", 9), ("内容", 80), ("作品链接", 8)]
     rows4 = [[a.alert_date, LEVEL_CN.get(a.level, a.level), ALERT_TYPE_CN.get(a.alert_type, a.alert_type),
               SEVERITY_CN.get(a.severity, a.severity), a.stock_code,
-              a.title, videos[a.aweme_id].aweme_url if a.aweme_id in videos else None] for a in data["alerts"]]
+              a.title, url_of(videos[a.aweme_id]) if a.aweme_id in videos else None] for a in data["alerts"]]
     _write_sheet(ws4, h4, rows4, st, link_col=6, band_key_col=None, freeze="A2", wrap_cols={5})
 
     # ---- 说明
@@ -282,20 +288,27 @@ def build_workbook(data: dict, today: date, generated_at: datetime):
         f"跟踪中的作品：{sum(1 for v in videos.values() if v.tracking_status == 'active')} 条；涉及公司：{len(agg)} 家",
         "",
         "跟踪总表：每个「公司 × 作品」一行，按公司名称拼音排序；一条作品涉及多家公司时会出现在每家公司下。",
-        "点赞/评论/转发/收藏：最近一次检查时的累计数；「日增」为较上一次检查的增量（隔了几天则按天平均），首次检查为空。",
+        f"{L}/{C}/{S}/{F}：最近一次检查时的累计数；「日增」为较上一次检查的增量（隔了几天则按天平均），首次检查为空。",
         "红色数字表示增加；浅红底色的行今天触发了预警。",
         "跟踪状态：跟踪中＝标记后 14 天内每天检查；已到期＝满 14 天停止；已不可见＝作品被删除或设为私密。",
         "观点：大模型根据作品内容判断的看多/看空/中性；识别依据：通过公司名称、股票代码、产品或技术识别。",
         "每日数据：每条作品每天的检查记录，可用筛选按公司或作品查看趋势。",
         "本表只有一份，包含全部历史数据；每天运行后更新内容，文件名中的日期即数据截至日期。",
     ]
+    if platform == "wechat":
+        notes += [
+            "",
+            "视频号说明：视频号不公开收藏数，「推荐」为作品的爱心（推荐）数；点赞为大拇指点赞数。",
+            "视频号作品没有可在电脑上打开的网页链接，可在微信里搜索「博主」名称找到作品。",
+            "视频号的视频文件是加密的，识别时使用作品文案和封面（图文为全部图片）上的文字，不做语音识别。",
+        ]
     ws5.column_dimensions["A"].width = 110
     for i, line in enumerate(notes, 1):
         ws5.cell(row=i, column=1, value=line).alignment = st["wrap"]
     return wb
 
 
-def generate_report(today: Optional[date] = None, out_dir: Optional[Path] = None) -> Path:
+def generate_report(today: Optional[date] = None, out_dir: Optional[Path] = None, platform: str = "douyin") -> Path:
     """
     生成（更新）唯一的跟踪表：写入以当天日期命名的新文件，再删除旧日期的那份，
     相当于「更新内容 + 改名」。旧文件若正被 Excel 打开而删不掉，下次运行再清理。
@@ -303,15 +316,16 @@ def generate_report(today: Optional[date] = None, out_dir: Optional[Path] = None
     today = today or date.today()
     out_dir = Path(out_dir or REPORT_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
-    wb = build_workbook(collect(today), today, datetime.now())
-    target = out_dir / report_name(today)
+    prefix = REPORT_PREFIXES[platform]
+    wb = build_workbook(collect(today, platform), today, datetime.now(), platform)
+    target = out_dir / report_name(today, platform)
     try:
         wb.save(target)
     except PermissionError:  # 当天的表格正在 Excel 中打开（同一天重复运行），换个文件名保存
-        target = out_dir / f"{REPORT_PREFIX}_{today:%Y%m%d}_{datetime.now():%H%M}.xlsx"
+        target = out_dir / f"{prefix}_{today:%Y%m%d}_{datetime.now():%H%M}.xlsx"
         wb.save(target)
         logger.warning(f"[跟踪表] 当天的表格正被打开，已另存为 {target.name}")
-    for old in out_dir.glob(f"{REPORT_PREFIX}*.xlsx"):
+    for old in out_dir.glob(f"{prefix}*.xlsx"):
         if old.resolve() == target.resolve():
             continue
         try:
@@ -322,6 +336,6 @@ def generate_report(today: Optional[date] = None, out_dir: Optional[Path] = None
     return target
 
 
-def latest_report(out_dir: Optional[Path] = None) -> Optional[Path]:
-    files = sorted(Path(out_dir or REPORT_DIR).glob(f"{REPORT_PREFIX}*.xlsx"), key=lambda p: p.stat().st_mtime)
+def latest_report(out_dir: Optional[Path] = None, platform: str = "douyin") -> Optional[Path]:
+    files = sorted(Path(out_dir or REPORT_DIR).glob(f"{REPORT_PREFIXES[platform]}*.xlsx"), key=lambda p: p.stat().st_mtime)
     return files[-1] if files else None

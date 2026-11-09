@@ -29,6 +29,8 @@ from .settings import MonitorSettings, get_settings
 
 METRICS = ("liked_count", "share_count", "collected_count", "comment_count")
 METRIC_CN = {"liked_count": "点赞", "share_count": "转发", "collected_count": "收藏", "comment_count": "评论"}
+# 视频号没有公开收藏数，collected_count 列存的是「推荐」（爱心）数
+METRIC_CN_BY_PLATFORM = {"douyin": METRIC_CN, "wechat": {**METRIC_CN, "collected_count": "推荐"}}
 STANCE_CN = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}
 
 
@@ -42,10 +44,12 @@ class Alert:
     aweme_id: Optional[str] = None
     stock_code: Optional[str] = None
     detail: dict = field(default_factory=dict)
+    platform: str = "douyin"
 
     @property
     def dedupe_key(self) -> str:
-        return f"{self.alert_date}:{self.level}:{self.alert_type}:{self.aweme_id or self.stock_code or ''}"
+        prefix = "" if self.platform == "douyin" else f"{self.platform}:"  # 抖音沿用旧格式，避免重复预警
+        return f"{prefix}{self.alert_date}:{self.level}:{self.alert_type}:{self.aweme_id or self.stock_code or ''}"
 
 
 Snap = Tuple[date, Dict[str, Optional[int]]]
@@ -66,8 +70,10 @@ def daily_deltas(snaps: Sequence[Snap]) -> List[Tuple[date, Dict[str, float]]]:
 
 
 class AlertEngine:
-    def __init__(self, settings: Optional[MonitorSettings] = None):
+    def __init__(self, settings: Optional[MonitorSettings] = None, platform: str = "douyin"):
         self.s = settings or get_settings()
+        self.platform = platform
+        self.metric_cn = METRIC_CN_BY_PLATFORM.get(platform, METRIC_CN)
         self.min_delta = {
             "liked_count": self.s.STOCK_VIDEO_ALERT_MIN_LIKES_DELTA,
             "share_count": self.s.STOCK_VIDEO_ALERT_MIN_SHARES_DELTA,
@@ -98,7 +104,7 @@ class AlertEngine:
                              "ratio": round(ratio, 1) if ratio != float("inf") else None}
         if not spikes:
             return []
-        parts = "、".join(f"{METRIC_CN[m]} +{v['today']:,}（日均 {v['baseline']:,.0f}）" for m, v in spikes.items())
+        parts = "、".join(f"{self.metric_cn[m]} +{v['today']:,}（日均 {v['baseline']:,.0f}）" for m, v in spikes.items())
         strong = len(spikes) >= 2 or any((v["ratio"] or 1e9) >= 2 * self.s.STOCK_VIDEO_ALERT_SPIKE_RATIO for v in spikes.values())
         return [Alert(today, "video", "spike", f"视频互动异动：{label} {parts}，涉及 {names}",
                       "high" if strong else "medium", video.aweme_id, detail={**base, "spikes": spikes})]
@@ -158,6 +164,7 @@ class AlertEngine:
                 v.aweme_id: v for v in s.scalars(
                     select(DouyinStockVideo).where(
                         DouyinStockVideo.is_company_analysis.is_(True),
+                        DouyinStockVideo.platform == self.platform,
                         DouyinStockVideo.discovered_at >= datetime.combine(window_start, datetime.min.time()),
                     )
                 )
@@ -185,11 +192,12 @@ class AlertEngine:
 
         # 公司维度汇总。运行天数不足时历史基线不可靠（日均接近 0，任何讨论都像「激增」），先不出公司级预警
         with session_scope() as s:
-            first_seen = s.scalar(select(func.min(DouyinStockVideo.discovered_at)))
+            first_seen = s.scalar(select(func.min(DouyinStockVideo.discovered_at))
+                                  .where(DouyinStockVideo.platform == self.platform))
         history_days = (today - first_seen.date()).days if first_seen else 0
         if history_days < self.s.STOCK_VIDEO_ALERT_WARMUP_DAYS:
             logger.info(f"[预警] 已积累 {history_days} 天数据，满 {self.s.STOCK_VIDEO_ALERT_WARMUP_DAYS} 天后才启用公司级预警")
-            return alerts
+            return self._tag(alerts)
         comp_videos: Dict[str, Dict[date, int]] = defaultdict(lambda: defaultdict(int))
         comp_inter: Dict[str, Dict[date, float]] = defaultdict(lambda: defaultdict(float))
         comp_stance: Dict[str, Dict[date, Dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
@@ -210,6 +218,15 @@ class AlertEngine:
                     comp_inter[m.stock_code][d] += delta["liked_count"] + delta["share_count"] + delta["collected_count"]
         for code in comp_name:
             alerts.extend(self.company_alerts(code, comp_name[code], comp_videos[code], comp_inter[code], comp_stance[code], today))
+        return self._tag(alerts)
+
+    def _tag(self, alerts: List[Alert]) -> List[Alert]:
+        if self.platform != "douyin":
+            label = "视频号" if self.platform == "wechat" else self.platform
+            for a in alerts:
+                a.platform = self.platform
+                if not a.title.startswith(f"[{label}]"):
+                    a.title = f"[{label}] {a.title}"
         return alerts
 
     @staticmethod
@@ -222,7 +239,7 @@ class AlertEngine:
                 if a.dedupe_key in existing:
                     continue
                 existing.add(a.dedupe_key)
-                s.add(StockVideoAlert(alert_date=a.alert_date, level=a.level, alert_type=a.alert_type, severity=a.severity,
+                s.add(StockVideoAlert(alert_date=a.alert_date, platform=a.platform, level=a.level, alert_type=a.alert_type, severity=a.severity,
                                       aweme_id=a.aweme_id, stock_code=a.stock_code, title=a.title, detail=dumps(a.detail),
                                       dedupe_key=a.dedupe_key, created_at=datetime.now(), notified=False))
                 new.append(a)

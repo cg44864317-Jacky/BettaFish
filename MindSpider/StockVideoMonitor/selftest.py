@@ -60,6 +60,15 @@ def check_tikhub() -> str:
             f"点赞 {sample.liked_count} 收藏 {sample.collected_count} 转发 {sample.share_count}")
 
 
+def check_wechat() -> str:
+    from .sources.wechat import WechatChannelsSource
+
+    recs = WechatChannelsSource().search_keyword("A股", pages=1)
+    if not recs:
+        raise RuntimeError("接口可用但没有返回作品")
+    return f"搜到 {len(recs)} 条最近一天的视频号作品；示例：{recs[0].desc[:30]}…（{recs[0].nickname}）"
+
+
 def check_akshare() -> str:
     """每日运行只用到人气股名单（有备用来源）；知识库已建好时不需要公司列表接口。"""
     from . import knowledge_base as kb
@@ -100,6 +109,8 @@ def run_selftest(include_tikhub: bool = True) -> bool:
             checks.append(_check("TikHub", check_tikhub, "检查 TIKHUB_API_KEY 和账户余额；国内网络访问不了时可尝试修改 TIKHUB_BASE_URL"))
         else:
             checks.append(("TikHub", False, "未配置 TIKHUB_API_KEY\n      → 在 .env 中填写 TIKHUB_API_KEY"))
+        if s.TIKHUB_API_KEY and "wechat" in [p.lower() for p in s.STOCK_VIDEO_PLATFORMS]:
+            checks.append(_check("视频号", check_wechat, "检查 TikHub 账户是否开通了视频号（WeChat）接口权限"))
     checks += [
         _check("人气股名单", check_akshare, "检查网络；数据库里还没有标记过的视频时，至少要能访问东方财富或雪球"),
         _check("内容解析", check_media, "检查 STOCK_VIDEO_OCR_BACKEND / STOCK_VIDEO_ASR_BACKEND 配置和相应依赖"),

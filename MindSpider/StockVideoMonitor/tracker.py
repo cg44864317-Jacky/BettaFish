@@ -33,7 +33,8 @@ class TrackStats:
 
 
 class DailyTracker:
-    def __init__(self, tracking: TrackingSource, settings: Optional[MonitorSettings] = None):
+    def __init__(self, tracking: TrackingSource, settings: Optional[MonitorSettings] = None, platform: str = "douyin"):
+        self.platform = platform
         self.tracking = tracking
         self.s = settings or get_settings()
 
@@ -44,7 +45,8 @@ class DailyTracker:
             rows = list(
                 s.scalars(
                     select(DouyinStockVideo).where(
-                        DouyinStockVideo.is_tracked.is_(True), DouyinStockVideo.tracking_status == "active"
+                        DouyinStockVideo.is_tracked.is_(True), DouyinStockVideo.tracking_status == "active",
+                        DouyinStockVideo.platform == self.platform,
                     )
                 )
             )
@@ -84,6 +86,10 @@ class DailyTracker:
                         stats.unavailable_ids.append(aid)
                     continue
                 row.miss_count = 0
+                if rec.export_id:
+                    row.export_id = rec.export_id
+                if rec.sec_uid and not row.sec_uid:
+                    row.sec_uid, row.author_uid = rec.sec_uid, rec.author_uid
                 for attr in ("liked_count", "comment_count", "share_count", "collected_count"):
                     if getattr(rec, attr) is not None:
                         setattr(row, attr, getattr(rec, attr))
@@ -91,7 +97,7 @@ class DailyTracker:
                 upsert_snapshot(s, aid, rec, now.date(), now)
                 stats.updated += 1
         logger.info(
-            f"[跟踪] 更新 {stats.updated}/{stats.active} 条，到期 {stats.expired}，查不到 {stats.missing}"
+            f"[跟踪·{'视频号' if self.platform == 'wechat' else '抖音'}] 更新 {stats.updated}/{stats.active} 条，到期 {stats.expired}，查不到 {stats.missing}"
             f"（判定不可见 {stats.unavailable}），TikHub 调用 {stats.api_calls} 次"
         )
         return stats

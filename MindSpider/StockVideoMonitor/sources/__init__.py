@@ -12,7 +12,7 @@ from .base import DiscoverySource, SourceError, TrackingSource, VideoRecord
 
 __all__ = [
     "DiscoverySource", "TrackingSource", "VideoRecord", "SourceError",
-    "FallbackDiscovery", "build_discovery", "build_tracking",
+    "FallbackDiscovery", "build_discovery", "build_tracking", "build_wechat",
 ]
 
 
@@ -86,6 +86,13 @@ def build_discovery(settings: Optional[MonitorSettings] = None) -> FallbackDisco
     else:
         order = [tikhub, _try_mediacrawler(s)]
     return FallbackDiscovery([x for x in order if x is not None])
+
+
+def build_wechat(settings: Optional[MonitorSettings] = None):
+    """视频号：发现和跟踪都走 TikHub 视频号接口。"""
+    from .wechat import WechatChannelsSource
+
+    return WechatChannelsSource(settings=settings or get_settings())
 
 
 def build_tracking(settings: Optional[MonitorSettings] = None) -> TrackingSource:

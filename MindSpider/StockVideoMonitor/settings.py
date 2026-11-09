@@ -66,6 +66,17 @@ class MonitorSettings(BaseSettings):
     STOCK_VIDEO_HOT_STOCK_KEYWORDS: int = Field(
         20, description="每天从东方财富人气榜取前 N 只股票名称作为动态搜索词，0 表示关闭"
     )
+    # ------------------------------------------------------------------ 视频号
+    STOCK_VIDEO_PLATFORMS: List[str] = Field(
+        default_factory=lambda: ["douyin", "wechat"], description="监控哪些平台（JSON 数组）：douyin 抖音、wechat 视频号"
+    )
+    STOCK_VIDEO_WECHAT_SEARCH_KEYWORDS: Optional[List[str]] = Field(
+        None, description="视频号搜索词（JSON 数组），不填则与抖音相同"
+    )
+    STOCK_VIDEO_WECHAT_SEARCH_PAGES: int = Field(5, description="视频号每个关键词翻几页（每页 10 条，按发布时间倒序）")
+    STOCK_VIDEO_WECHAT_HOT_STOCK_KEYWORDS: int = Field(10, description="视频号每天加入的人气股搜索词个数，0 表示关闭")
+    STOCK_VIDEO_WECHAT_CREATOR_POOL_MAX: int = Field(100, description="视频号每天最多拉取多少个财经博主的新作品")
+
     STOCK_VIDEO_CREATOR_POOL_ENABLED: bool = Field(True, description="是否拉取财经博主池里博主的最新作品")
     STOCK_VIDEO_CREATOR_POOL_MAX: int = Field(300, description="每天最多拉取多少个博主（按最近活跃排序）")
     STOCK_VIDEO_LOOKBACK_HOURS: int = Field(26, description="只保留多少小时内发布的视频（略大于 24 防漏）")

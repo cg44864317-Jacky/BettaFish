@@ -755,3 +755,112 @@ def test_hot_stock_names_fall_back_to_own_data(settings, monkeypatch):
                                           stock_name=name, video_create_time=ts))
     assert kb.fetch_hot_stock_names(5) == ["贵州茅台", "宁德时代"]
     assert kb.HOT_SOURCE_USED == "近 7 天被标记最多的公司"
+
+
+# ---------------------------------------------------------------------- 视频号
+# 响应结构取自 2026-11-09 对 TikHub 视频号接口的真实请求（字段做了精简）
+def wx_item(nonce, title, ts, author="财经博主"):
+    return {"dateTime": "1小时前", "docID": f"finderobj{nonce}", "duration": "03:08",
+            "exportId": f"export/{nonce}-{ts}", "image": f"https://findermp.video.qq.com/{nonce}.jpg",
+            "jumpInfo": {"extInfo": json.dumps({"encryptedObjectId": f"export/{nonce}", "feedNonceId": nonce}), "jumpType": 9},
+            "pubTime": ts, "showType": 1, "source": {"title": author}, "title": f'<em class="highlight">A股</em>{title}'}
+
+
+def wx_search_page(items, cont=1):
+    return {"code": 200, "data": {"keyword": "A股", "continue_flag": cont, "offset": 10, "cursor": "c1",
+                                  "results": {"data": [{"subBoxes": [{"items": [it]} for it in items]}]}}}
+
+
+def wx_obj(nonce, desc, ts, user="v2_abc@finder", fav=100, like=50, fwd=20, cmt=10, media_type=4):
+    return {"id": int(nonce) + 1, "objectNonceId": f"{nonce}_0_0_0_0_0_x", "createtime": ts, "username": user,
+            "nickname": "财经博主", "contact": {"username": user, "nickname": "财经博主", "fansCount": 0},
+            "favCount": fav, "likeCount": like, "forwardCount": fwd, "commentCount": cmt,
+            "objectDesc": {"description": desc, "mediaType": media_type,
+                           "media": [{"url": "http://wxapp.tc.qq.com/v", "urlToken": "&t=1", "coverUrl": "https://wxapp.tc.qq.com/c",
+                                      "coverUrlToken": "&t=2", "videoPlayLen": 188, "decodeKey": "1"}]}}
+
+
+def test_wechat_parsers():
+    from StockVideoMonitor.sources import wechat as wx
+
+    r = wx.parse_search_item(wx_item("17102841814157420753", "茅台深度分析#股票 #A股", 1794229506, "湘妹子聊股"))
+    assert (r.aweme_id, r.platform, r.nickname, r.duration_ms) == ("wx_17102841814157420753", "wechat", "湘妹子聊股", 188000)
+    assert r.desc.startswith("A股茅台") and r.hashtags == ["股票", "A股"] and r.aweme_url == "" and r.export_id
+    o = wx.parse_objects({"objects": [wx_obj("17102841814157420753", "茅台", 1794229506, fav=586, like=321, fwd=445, cmt=176)]})[0]
+    assert o.aweme_id == r.aweme_id  # 搜索的 feedNonceId 与详情的 objectNonceId 第一段一致
+    assert (o.liked_count, o.collected_count, o.share_count, o.comment_count) == (586, 321, 445, 176)
+    assert o.sec_uid == "v2_abc@finder" and o.cover_url.endswith("&t=2") and not o.is_image_post
+    img = wx.parse_object(wx_obj("5", "图文", 1, media_type=2))
+    assert img.is_image_post and img.image_urls == ["http://wxapp.tc.qq.com/v&t=1"] and img.duration_ms is None
+
+
+def test_wechat_end_to_end(settings, tmp_path, monkeypatch):
+    import openpyxl
+    from StockVideoMonitor.alerts import AlertEngine
+    from StockVideoMonitor.report import generate_report
+    from StockVideoMonitor.sources import wechat as wx
+
+    monkeypatch.setattr(th.time, "sleep", lambda *_: None)
+    seed_kb()
+    day0 = datetime(2026, 11, 9, 5, 0)
+    ts = int((day0 - timedelta(hours=3)).timestamp())
+    state = {"day": 0}
+    calls = []
+
+    def handler(request: httpx.Request):
+        body = json.loads(request.content or b"{}")
+        calls.append(request.url.path)
+        if request.url.path == wx.SEARCH_PATH:
+            assert body["sort"] == "latest" and body["publish_time"] == "day"
+            if body["keyword"] != "股票":
+                return httpx.Response(200, json=wx_search_page([], cont=0))
+            if not body.get("cursor"):
+                return httpx.Response(200, json=wx_search_page([wx_item("111", "宁王麒麟电池股票分析", ts),
+                                                                wx_item("222", "猫咪日常", ts)]))
+            return httpx.Response(200, json=wx_search_page([wx_item("333", "茅台股票深度分析", ts)], cont=0))
+        if request.url.path == wx.DETAIL_PATH:
+            nonce = body["export_id"].split("/")[1].split("-")[0]
+            desc = {"111": "宁王麒麟电池股票分析（完整文案）", "333": "茅台股票深度分析"}[nonce]
+            return httpx.Response(200, json={"code": 200, "data": {"objects": [wx_obj(nonce, desc, ts, fav=100)]}})
+        if request.url.path == wx.USER_VIDEOS_PATH:
+            assert body["username"] == "v2_abc@finder"
+            bump = 5000 if state["day"] else 0
+            return httpx.Response(200, json={"code": 200, "data": {"object": [
+                wx_obj("111", "宁王", ts, fav=100 + bump, like=60), wx_obj("333", "茅台", ts, fav=100 + bump, like=70),
+                wx_obj("999", "旧作品", ts - 5 * 86400)], "lastBuffer": ""}})
+        return httpx.Response(404)
+
+    src = wx.WechatChannelsSource(wx.TikHubClient(settings, transport=httpx.MockTransport(handler)), settings)
+    clf = TwoStageClassifier(matcher_from_kb(), FakeLLM())
+    stats = DailyDiscovery(src, clf, noop_analyzer(settings), src, settings, hot_keywords_fn=lambda n: [],
+                           platform="wechat").run(day0)
+    assert (stats.candidates, stats.flagged) == (3, 2)
+    assert calls.count(wx.DETAIL_PATH) == 2  # 只对标记的作品查详情
+    with mdb.session_scope() as s:
+        v = s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == "wx_111"))
+        assert (v.platform, v.sec_uid, v.object_id, v.desc) == ("wechat", "v2_abc@finder", "112", "宁王麒麟电池股票分析（完整文案）")
+        assert s.get(DouyinFinanceCreator, "v2_abc@finder").platform == "wechat"
+
+    # 次日跟踪：同一作者的两条作品只需一次作者列表请求
+    state["day"] = 1
+    calls.clear()
+    day1 = day0 + timedelta(days=1)
+    t = DailyTracker(src, settings, platform="wechat").run(day1)
+    assert t.updated == 2 and calls == [wx.USER_VIDEOS_PATH]
+    # 抖音的跟踪不会碰到视频号作品
+    assert DailyTracker(FakeTracking(), settings).run(day1).active == 0
+
+    alerts = AlertEngine(settings, platform="wechat").evaluate(day1.date())
+    assert alerts and all(a.platform == "wechat" and a.title.startswith("[视频号]") for a in alerts)
+    AlertEngine.save(alerts)
+    assert AlertEngine(settings).evaluate(day1.date()) == []  # 抖音预警不含视频号作品
+
+    path = generate_report(day1.date(), out_dir=tmp_path, platform="wechat")
+    dy = generate_report(day1.date(), out_dir=tmp_path)
+    assert path.name == "视频号上市公司分析视频跟踪_20261110.xlsx" and dy.name == "抖音上市公司分析视频跟踪_20261110.xlsx"
+    ws = openpyxl.load_workbook(path)["跟踪总表"]
+    header = [c.value for c in ws[1]]
+    rows = [dict(zip(header, [c.value for c in r])) for r in ws.iter_rows(min_row=2)]
+    assert "推荐" in header and "收藏" not in header
+    assert {r["公司名称"] for r in rows} == {"宁德时代", "贵州茅台"} and all(r["点赞日增"] == 5000 for r in rows)
+    assert openpyxl.load_workbook(dy)["跟踪总表"].max_row == 1  # 抖音表里没有视频号作品

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""每日任务编排：跟踪 → 发现与识别 → 预警 → 通知 → 跟踪表。"""
+"""每日任务编排（抖音、视频号）：跟踪 → 发现与识别 → 预警 → 通知 → 各平台跟踪表。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,8 @@ from .llm import OpenAICompatLLM
 from .media import MediaAnalyzer
 from .notifiers import notify
 from .settings import MonitorSettings, get_settings
-from .sources import SourceError, build_discovery, build_tracking
+from .sources import SourceError, build_discovery, build_tracking, build_wechat
+from .sources.base import PLATFORM_CN
 from .tracker import DailyTracker
 
 
@@ -47,41 +48,49 @@ def run_daily(now: Optional[datetime] = None, settings: Optional[MonitorSettings
         return summary
     hard_deadline = finish_by - timedelta(minutes=s.STOCK_VIDEO_RESERVE_MINUTES) if finish_by else None
 
-    try:
-        tracking = build_tracking(s)
-    except SourceError as e:
-        logger.error(f"{e}；本次只做发现，不做跟踪")
-        tracking = None
+    platforms = [p for p in dict.fromkeys(x.lower() for x in s.STOCK_VIDEO_PLATFORMS) if p in ("douyin", "wechat")]
+    trackers: dict = {}
+    for p in platforms:
+        try:
+            trackers[p] = build_tracking(s) if p == "douyin" else build_wechat(s)
+        except SourceError as e:
+            logger.error(f"[{PLATFORM_CN[p]}] {e}；本次不处理该平台")
 
     # 先跟踪：只需批量查询，几分钟就能完成，保证每天的互动数据不因识别耗时而缺失
-    unavailable = []
-    if tracking is not None and not skip_tracking:
-        tstats = DailyTracker(tracking, s).run(now)
-        summary["tracking"] = asdict(tstats)
-        unavailable = tstats.unavailable_ids
+    unavailable: dict = {p: [] for p in platforms}
+    for p, tracking in trackers.items():
+        if skip_tracking:
+            break
+        tstats = DailyTracker(tracking, s, platform=p).run(now)
+        summary[f"tracking_{p}"] = asdict(tstats)
+        unavailable[p] = tstats.unavailable_ids
 
+    # 再发现：视频号只识别文案和封面，很快，先做；抖音要下载解析视频，耗时长，放在后面
     if not skip_discovery:
-        if hard_deadline and datetime.now() >= hard_deadline:
-            logger.warning("[每日任务] 跟踪结束时已接近截止时间，本次不做发现")
-        else:
-            matcher = load_matcher()
-            llm = OpenAICompatLLM(s)
+        matcher = llm = None
+        for p in sorted(trackers, key=lambda x: x != "wechat"):
+            if hard_deadline and datetime.now() >= hard_deadline:
+                logger.warning(f"[每日任务] 已接近截止时间，本次不做{PLATFORM_CN[p]}的发现")
+                continue
+            if matcher is None:
+                matcher, llm = load_matcher(), OpenAICompatLLM(s)
             classifier = TwoStageClassifier(matcher, llm, s.STOCK_VIDEO_PREFILTER_BATCH, s.STOCK_VIDEO_MIN_CONFIDENCE)
-            disc = DailyDiscovery(build_discovery(s), classifier, MediaAnalyzer(s), tracking, s)
-            summary["discovery"] = asdict(disc.run(now, hard_deadline))
+            source = build_discovery(s) if p == "douyin" else trackers[p]
+            disc = DailyDiscovery(source, classifier, MediaAnalyzer(s), trackers[p], s, platform=p)
+            summary[f"discovery_{p}"] = asdict(disc.run(now, hard_deadline))
 
-    engine = AlertEngine(s)
-    new_alerts = engine.save(engine.evaluate(now.date(), unavailable))
-    notify(new_alerts, s)
-    summary["alerts"] = len(new_alerts)
-    try:  # 跟踪表生成失败不影响每日任务本身
-        from .report import generate_report
+    from .report import generate_report
 
-        summary["report"] = str(generate_report(now.date()))
-    except Exception as e:
-        logger.exception(f"[跟踪表] 生成失败：{e}")
-    if tracking is not None and hasattr(tracking, "client"):
-        summary["tikhub_calls"] = tracking.client.calls
+    for p in platforms:
+        engine = AlertEngine(s, platform=p)
+        new_alerts = engine.save(engine.evaluate(now.date(), unavailable.get(p, [])))
+        notify(new_alerts, s)
+        summary[f"alerts_{p}"] = len(new_alerts)
+        try:  # 跟踪表生成失败不影响每日任务本身
+            summary[f"report_{p}"] = str(generate_report(now.date(), platform=p))
+        except Exception as e:
+            logger.exception(f"[跟踪表·{PLATFORM_CN[p]}] 生成失败：{e}")
+    summary["tikhub_calls"] = {p: t.client.calls for p, t in trackers.items() if hasattr(t, "client")}
     if s.STOCK_VIDEO_CLEANUP:
         from .cleanup import run_cleanup
 

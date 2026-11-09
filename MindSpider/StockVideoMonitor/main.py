@@ -64,18 +64,24 @@ def cmd_cleanup(_args) -> None:
     run_cleanup()
 
 
+def _platforms() -> list:
+    from .settings import get_settings
+
+    return [p for p in dict.fromkeys(x.lower() for x in get_settings().STOCK_VIDEO_PLATFORMS) if p in ("douyin", "wechat")]
+
+
 def cmd_track(_args) -> None:
     from .alerts import AlertEngine
     from .notifiers import notify
-    from .sources import build_tracking
+    from .report import generate_report
+    from .sources import build_tracking, build_wechat
     from .tracker import DailyTracker
 
-    stats = DailyTracker(build_tracking()).run()
-    engine = AlertEngine()
-    notify(engine.save(engine.evaluate(date.today(), stats.unavailable_ids)))
-    from .report import generate_report
-
-    generate_report()
+    for p in _platforms():
+        stats = DailyTracker(build_tracking() if p == "douyin" else build_wechat(), platform=p).run()
+        engine = AlertEngine(platform=p)
+        notify(engine.save(engine.evaluate(date.today(), stats.unavailable_ids)))
+        generate_report(platform=p)
 
 
 def cmd_report(args) -> None:
@@ -83,18 +89,20 @@ def cmd_report(args) -> None:
 
     from .report import generate_report
 
-    path = generate_report()
-    print(f"跟踪表已更新：{path}")
-    if args.open and hasattr(os, "startfile"):
-        os.startfile(str(path))  # Windows：用默认程序（Excel/WPS）打开
+    for p in _platforms():
+        path = generate_report(platform=p)
+        print(f"跟踪表已更新：{path}")
+        if args.open and hasattr(os, "startfile"):
+            os.startfile(str(path))  # Windows：用默认程序（Excel/WPS）打开
 
 
 def cmd_alerts(_args) -> None:
     from .alerts import AlertEngine
     from .notifiers import notify
 
-    engine = AlertEngine()
-    notify(engine.save(engine.evaluate(date.today())))
+    for p in _platforms():
+        engine = AlertEngine(platform=p)
+        notify(engine.save(engine.evaluate(date.today())))
 
 
 def cmd_add_creator(args) -> None:
@@ -133,15 +141,19 @@ def cmd_selftest(args) -> None:
 
 
 def cmd_status(_args) -> None:
+    create_tables()
     with session_scope() as s:
-        kb = s.scalar(select(func.count()).select_from(AShareCompany))
-        total = s.scalar(select(func.count()).select_from(DouyinStockVideo))
-        flagged = s.scalar(select(func.count()).select_from(DouyinStockVideo).where(DouyinStockVideo.is_company_analysis.is_(True)))
-        active = s.scalar(select(func.count()).select_from(DouyinStockVideo).where(DouyinStockVideo.tracking_status == "active"))
-        creators = s.scalar(select(func.count()).select_from(DouyinFinanceCreator).where(DouyinFinanceCreator.enabled.is_(True)))
-        alerts7 = s.scalar(select(func.count()).select_from(StockVideoAlert).where(StockVideoAlert.alert_date >= date.today() - timedelta(days=6)))
-    print(f"知识库公司数：{kb}\n已收录财经视频：{total}\n上市公司分析视频：{flagged}\n"
-          f"正在跟踪：{active}\n博主池：{creators}\n近 7 日预警：{alerts7}")
+        print(f"知识库公司数：{s.scalar(select(func.count()).select_from(AShareCompany))}")
+        for p, label in (("douyin", "抖音"), ("wechat", "视频号")):
+            v = DouyinStockVideo
+            total = s.scalar(select(func.count()).select_from(v).where(v.platform == p))
+            flagged = s.scalar(select(func.count()).select_from(v).where(v.platform == p, v.is_company_analysis.is_(True)))
+            active = s.scalar(select(func.count()).select_from(v).where(v.platform == p, v.tracking_status == "active"))
+            creators = s.scalar(select(func.count()).select_from(DouyinFinanceCreator).where(
+                DouyinFinanceCreator.platform == p, DouyinFinanceCreator.enabled.is_(True)))
+            alerts7 = s.scalar(select(func.count()).select_from(StockVideoAlert).where(
+                StockVideoAlert.platform == p, StockVideoAlert.alert_date >= date.today() - timedelta(days=6)))
+            print(f"【{label}】已收录财经作品 {total}，上市公司分析 {flagged}，正在跟踪 {active}，博主池 {creators}，近 7 日预警 {alerts7}")
 
 
 def cmd_schedule(args) -> None:

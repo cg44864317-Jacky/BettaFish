@@ -7,7 +7,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional
 
-IMAGE_AWEME_TYPES = {2, 68, 150}  # 抖音图文作品类型
+IMAGE_AWEME_TYPES = {2, 68, 150}  # 抖音图文作品类型（视频号图文也映射为 68）
+PLATFORM_CN = {"douyin": "抖音", "wechat": "视频号"}
 
 
 @dataclass
@@ -32,6 +33,9 @@ class VideoRecord:
     image_urls: List[str] = field(default_factory=list)  # 图文作品的图片地址
     source: str = ""
     channels: List[str] = field(default_factory=list)  # 被哪些召回路径找到
+    platform: str = "douyin"
+    object_id: Optional[str] = None  # 视频号作品 id
+    export_id: Optional[str] = None  # 视频号 exportId
 
     @property
     def is_image_post(self) -> bool:
@@ -39,6 +43,8 @@ class VideoRecord:
 
     @property
     def aweme_url(self) -> str:
+        if self.platform != "douyin":  # 视频号作品没有可在电脑浏览器打开的公开网址
+            return ""
         kind = "note" if self.is_image_post else "video"
         return f"https://www.douyin.com/{kind}/{self.aweme_id}"
 

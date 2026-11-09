@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-抖音 A 股上市公司分析视频监控 —— 数据表
+抖音 / 视频号 A 股上市公司分析视频监控 —— 数据表（两个平台共用，按 platform 列区分）
 
 表名沿用「平台_类型」规则，InsightEngine 可直接查询：
 - a_share_company              A 股上市公司知识库（名称、简称、产品、技术、品牌）
@@ -67,7 +67,11 @@ class DouyinStockVideo(MonitorBase):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 抖音为 aweme_id；视频号为 "wx_" + 作品 nonce（各接口间保持不变）
     aweme_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    platform: Mapped[str] = mapped_column(String(16), default="douyin", index=True)  # douyin / wechat
+    object_id: Mapped[Optional[str]] = mapped_column(String(64))  # 视频号作品 id
+    export_id: Mapped[Optional[str]] = mapped_column(Text)  # 视频号 exportId（每次请求会变，存最近一次的）
     title: Mapped[Optional[str]] = mapped_column(Text)
     desc: Mapped[Optional[str]] = mapped_column(Text)
     hashtags: Mapped[Optional[str]] = mapped_column(Text)  # JSON 数组
@@ -144,7 +148,8 @@ class DouyinStockVideoSnapshot(MonitorBase):
 class DouyinFinanceCreator(MonitorBase):
     __tablename__ = "douyin_finance_creator"
 
-    sec_uid: Mapped[str] = mapped_column(String(128), primary_key=True)
+    sec_uid: Mapped[str] = mapped_column(String(128), primary_key=True)  # 视频号为 finder username
+    platform: Mapped[str] = mapped_column(String(16), default="douyin", index=True)
     author_uid: Mapped[Optional[str]] = mapped_column(String(64))
     nickname: Mapped[Optional[str]] = mapped_column(String(255))
     follower_count: Mapped[Optional[int]] = mapped_column(BigInteger)
@@ -161,6 +166,7 @@ class StockVideoAlert(MonitorBase):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     alert_date: Mapped[date] = mapped_column(Date, index=True)
+    platform: Mapped[str] = mapped_column(String(16), default="douyin", index=True)
     level: Mapped[str] = mapped_column(String(16))  # video / company
     alert_type: Mapped[str] = mapped_column(String(32))
     severity: Mapped[str] = mapped_column(String(16), default="medium")  # low / medium / high
