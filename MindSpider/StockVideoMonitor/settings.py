@@ -75,6 +75,8 @@ class MonitorSettings(BaseSettings):
     )
     STOCK_VIDEO_WECHAT_SEARCH_PAGES: int = Field(5, description="视频号每个关键词翻几页（每页 10 条，按发布时间倒序）")
     STOCK_VIDEO_WECHAT_HOT_STOCK_KEYWORDS: int = Field(10, description="视频号每天加入的人气股搜索词个数，0 表示关闭")
+    STOCK_VIDEO_WECHAT_JUDGE_WORKERS: int = Field(4, description="视频号识别时同时处理几条作品（主要在等网络和大模型）")
+    STOCK_VIDEO_JUDGE_WORKERS: int = Field(2, description="抖音识别时同时处理几条作品（要下载视频、做语音和文字识别，较占内存）")
     STOCK_VIDEO_WECHAT_CREATOR_POOL_MAX: int = Field(100, description="视频号每天最多拉取多少个财经博主的新作品")
 
     STOCK_VIDEO_CREATOR_POOL_ENABLED: bool = Field(True, description="是否拉取财经博主池里博主的最新作品")

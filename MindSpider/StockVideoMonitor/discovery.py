@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
@@ -82,6 +84,7 @@ class DailyDiscovery:
         platform: str = "douyin",
     ):
         self.platform = platform
+        self._db_lock = threading.Lock()
         self.discovery = discovery
         self.classifier = classifier
         self.analyzer = analyzer
@@ -209,30 +212,45 @@ class DailyDiscovery:
         stop_at = hard_deadline.timestamp() if hard_deadline else None
         if stop_at:  # 截止前 8 分钟起只用文字判断（每条只需几秒），到截止时间就停
             deadline = min(deadline, stop_at - 8 * 60)
-        budget_warned = False
-        for i, aid in enumerate(finance_ids, 1):
+        state = {"warned": False, "done": 0}
+        lock = threading.Lock()
+        total = len(finance_ids)
+
+        def work(aid: str) -> None:
             if stop_at and time.time() >= stop_at:
-                stats.deferred = len(finance_ids) - i + 1
-                logger.warning(f"[识别] 已到截止时间，剩余 {stats.deferred} 条留到下次运行处理")
-                break
+                with lock:
+                    stats.deferred += 1
+                return
             t0 = time.time()
-            flagged_before = stats.flagged
             skip_media = time.time() > deadline
-            if skip_media and not budget_warned:
-                budget_warned = True
+            if skip_media and not state["warned"]:
+                state["warned"] = True
                 logger.warning(f"[识别] 已超过解析时间预算（{self.s.STOCK_VIDEO_ANALYSIS_BUDGET_MINUTES} 分钟），剩余作品只用文字判断")
             try:
-                self._judge_one(aid, texts[aid], fresh.get(aid), now, stats, skip_media=skip_media)
-                logger.info(f"[识别] ({i}/{len(finance_ids)}) {aid} 完成，用时 {time.time() - t0:.0f}s"
-                            f"{'，标记为上市公司分析' if stats.flagged > flagged_before else ''}")
+                flagged = self._judge_one(aid, texts[aid], fresh.get(aid), now, stats, skip_media=skip_media)
+                with lock:
+                    state["done"] += 1
+                    n = state["done"]
+                logger.info(f"[识别] ({n}/{total}) {aid} 完成，用时 {time.time() - t0:.0f}s"
+                            f"{'，标记为上市公司分析' if flagged else ''}")
+                if n % 20 == 0:
+                    logger.info(f"[识别] 精判进度 {n}/{total}，已标记 {stats.flagged} 条")
             except Exception as e:
-                stats.failed += 1
+                with lock:
+                    stats.failed += 1
                 logger.exception(f"[识别] {aid} 处理失败：{e}")
-                with session_scope() as s:
+                with self._db_lock, session_scope() as s:
                     row = s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == aid))
                     row.stage, row.error_message = "failed", str(e)[:1000]
-            if i % 20 == 0:
-                logger.info(f"[识别] 精判进度 {i}/{len(finance_ids)}，已标记 {stats.flagged} 条")
+
+        workers = max(1, self.s.STOCK_VIDEO_WECHAT_JUDGE_WORKERS if self.platform == "wechat" else self.s.STOCK_VIDEO_JUDGE_WORKERS)
+        if workers > 1:
+            logger.info(f"[识别] {total} 条作品，{workers} 条同时处理")
+        # 每条作品的耗时主要在等网络（下载、文字识别、大模型），多条同时处理可成倍缩短总时间
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(work, finance_ids))
+        if stats.deferred:
+            logger.warning(f"[识别] 已到截止时间，剩余 {stats.deferred} 条留到下次运行处理")
 
     def pending_ids(self, now: datetime) -> List[str]:
         """近几天内发现、但上次运行中断（或到截止时间）而未完成识别的作品。"""
@@ -246,7 +264,7 @@ class DailyDiscovery:
             ))
 
     def _judge_one(self, aid: str, text: str, fresh: Optional[VideoRecord], now: datetime, stats: DiscoveryStats,
-                   skip_media: bool = False) -> None:
+                   skip_media: bool = False) -> bool:
         with session_scope() as s:
             row = s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == aid))
             video_url = (fresh.video_url if fresh else None) or row.video_url
@@ -273,7 +291,7 @@ class DailyDiscovery:
             except SourceError as e:
                 logger.warning(f"[识别] {aid} 查询详情失败，明天跟踪时再补：{e}")
 
-        with session_scope() as s:
+        with self._db_lock, session_scope() as s:  # 多线程时写库串行，避免同一博主被同时加入博主池
             row = s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == aid))
             if fresh:
                 for attr in ("sec_uid", "author_uid", "object_id", "export_id", "nickname", "follower_count", "cover_url"):
@@ -294,7 +312,7 @@ class DailyDiscovery:
             row.analysis_raw = dumps(result.raw) if result.raw is not None else None
             row.stage = "analyzed"
             if not result.is_company_analysis:
-                return
+                return False
             stats.flagged += 1
             row.is_tracked, row.tracking_status = True, "active"
             row.track_until = now + timedelta(days=self.s.STOCK_VIDEO_TRACK_DAYS)
@@ -322,6 +340,7 @@ class DailyDiscovery:
                     s.add(c)
                 c.flagged_video_count = (c.flagged_video_count or 0) + 1
                 c.last_flagged_at = now
+        return True
 
     # -------------------------------------------------------------- 入口
     def run(self, now: Optional[datetime] = None, hard_deadline: Optional[datetime] = None) -> DiscoveryStats:
