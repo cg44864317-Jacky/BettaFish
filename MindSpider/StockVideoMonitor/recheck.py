@@ -68,6 +68,66 @@ def recheck(matcher: CompanyMatcher = None, dry_run: bool = False) -> RecheckSta
     return stats
 
 
+def rejudge(workers: int = 4, dry_run: bool = False) -> RecheckStats:
+    """用新的识别规则（只算「主要分析对象」）对已标记作品重新判断一次。
+    只用已保存的文字（标题、文案、话题、语音文字、画面文字）调用大模型，不访问 TikHub、不下载视频。"""
+    import json
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .classifier import TwoStageClassifier
+    from .llm import OpenAICompatLLM
+    from .settings import get_settings
+
+    s_ = get_settings()
+    clf = TwoStageClassifier(load_matcher(), OpenAICompatLLM(s_), s_.STOCK_VIDEO_PREFILTER_BATCH, s_.STOCK_VIDEO_MIN_CONFIDENCE)
+    stats = RecheckStats()
+    lock = threading.Lock()
+    with session_scope() as s:
+        items = [(v.aweme_id, "\n".join(x for x in (v.title, v.desc, " ".join("#" + t for t in loads_list(v.hashtags))) if x),
+                  v.asr_text or "", v.ocr_text or "", v.platform, (v.title or v.desc or "")[:30])
+                 for v in s.scalars(select(DouyinStockVideo).where(DouyinStockVideo.is_company_analysis.is_(True)))]
+    total = len(items)
+    logger.info(f"[重判] 共 {total} 条已标记作品，{workers} 条同时处理{'（试运行，不修改数据）' if dry_run else ''}")
+
+    def work(item):
+        aid, text, asr, ocr, platform, title = item
+        try:
+            r = clf.judge(text, asr, ocr)
+        except Exception as e:  # 单条失败保持原样
+            logger.warning(f"[重判] {aid} 失败，保持原样：{e}")
+            return
+        with lock, session_scope() as s:
+            stats.videos += 1
+            links = list(s.scalars(select(DouyinStockVideoCompany).where(DouyinStockVideoCompany.aweme_id == aid)))
+            keep = {m.stock_code for m in r.companies} if r.is_company_analysis else set()
+            bad = [m for m in links if m.stock_code not in keep]
+            for m in bad:
+                stats.removed_links += 1
+                if len(stats.examples) < 30:
+                    stats.examples.append((title, f"{m.stock_name}({m.stock_code})", platform))
+            if dry_run:
+                return
+            for m in bad:
+                s.delete(m)
+            v = s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == aid))
+            if not keep or len(bad) == len(links):
+                stats.unflagged += 1
+                v.is_company_analysis, v.is_tracked, v.tracking_status = False, False, "none"
+            v.analysis_raw = json.dumps(r.raw, ensure_ascii=False)[:20000] if r.raw else v.analysis_raw
+            if stats.videos % 50 == 0:
+                logger.info(f"[重判] 进度 {stats.videos}/{total}")
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        list(pool.map(work, items))
+    verb = "将" if dry_run else "已"
+    logger.info(f"[重判] 完成 {stats.videos}/{total} 条：{verb}去掉 {stats.removed_links} 个非主要分析对象的公司，"
+                f"{verb}取消 {stats.unflagged} 条作品的标记")
+    for title, comp, platform in stats.examples:
+        logger.info(f"[重判]   {'视频号' if platform == 'wechat' else '抖音'}「{title}」去掉 {comp}")
+    return stats
+
+
 FIELD_CN = (("title", "标题"), ("desc", "文案"), ("hashtags", "话题"), ("asr_text", "语音文字"), ("ocr_text", "画面文字"))
 
 

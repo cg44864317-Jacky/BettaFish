@@ -950,3 +950,50 @@ def test_explain_shows_where_company_matched(settings, capsys):
     assert explain("欣旺达", _battery_matcher()) == 1
     out = capsys.readouterr().out
     assert "画面文字里匹配到「欣旺达」" in out and "自选股" in out
+
+
+def test_mentions_and_industry_terms_are_not_analysis_targets():
+    from StockVideoMonitor.knowledge_base import is_generic_category
+
+    assert is_generic_category("半导体材料") and is_generic_category("动力电池") and not is_generic_category("麒麟电池")
+
+    class RoleLLM:
+        def complete_json(self, system, user):
+            assert "role" in system
+            return {"is_company_analysis": True, "confidence": 0.9, "summary": "云南锗业涨停", "companies": [
+                {"code": "300750", "name": "宁德时代", "role": "main", "basis": "name", "stance": "bullish", "evidence": "宁德时代"},
+                {"code": "300014", "name": "亿纬锂能", "role": "mention", "basis": "name", "stance": "neutral", "evidence": "亿纬锂能跟涨"},
+            ]}
+
+    r = TwoStageClassifier(_battery_matcher(), RoleLLM()).judge("宁德时代涨停，亿纬锂能跟涨")
+    assert [m.stock_code for m in r.companies] == ["300750"]
+    # 只命中行业泛称「动力电池」不足以挂上欣旺达
+    assert "300207" not in _battery_matcher().match("动力电池行业周报")
+
+
+def test_rejudge_keeps_only_main_companies(settings, monkeypatch):
+    from StockVideoMonitor import recheck as rc
+    from StockVideoMonitor.models import DouyinStockVideoCompany
+
+    class MainOnlyLLM:
+        def complete_json(self, system, user):
+            main = [{"code": "300750", "name": "宁德时代", "role": "main", "basis": "name", "stance": "bullish", "evidence": "宁德时代"}]
+            return {"is_company_analysis": "宁德时代" in user, "confidence": 0.9, "summary": "x",
+                    "companies": main if "宁德时代" in user else []}
+
+    monkeypatch.setattr(rc, "load_matcher", _battery_matcher)
+    import StockVideoMonitor.llm as llm_mod
+    monkeypatch.setattr(llm_mod, "OpenAICompatLLM", lambda s: MainOnlyLLM())
+    with mdb.session_scope() as s:
+        s.add(DouyinStockVideo(aweme_id="v1", desc="宁德时代财报解读", ocr_text="理想入股欣旺达", stage="analyzed",
+                               is_company_analysis=True, is_tracked=True, tracking_status="active", miss_count=0))
+        s.add(DouyinStockVideo(aweme_id="v2", desc="云南锗业涨停，欣旺达跟涨", stage="analyzed",
+                               is_company_analysis=True, is_tracked=True, tracking_status="active", miss_count=0))
+        for aid, code, name in [("v1", "300750", "宁德时代"), ("v1", "300207", "欣旺达"), ("v2", "300207", "欣旺达")]:
+            s.add(DouyinStockVideoCompany(aweme_id=aid, stock_code=code, stock_name=name))
+    assert rc.rejudge(workers=2, dry_run=True).removed_links == 2
+    st = rc.rejudge(workers=2)
+    assert (st.removed_links, st.unflagged) == (2, 1)
+    with mdb.session_scope() as s:
+        assert [c.stock_code for c in s.scalars(select(DouyinStockVideoCompany))] == ["300750"]
+        assert s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == "v2")).is_tracked is False

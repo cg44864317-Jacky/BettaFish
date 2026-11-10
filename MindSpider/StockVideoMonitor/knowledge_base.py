@@ -35,6 +35,27 @@ GENERIC_TERMS = {
     "中国", "集团", "股份", "科技", "控股", "实业", "发展", "产品", "技术", "其他", "主营业务",
     "龙头", "龙头股", "牛股", "妖股", "白马", "蓝筹", "概念股", "板块",
 }
+# 「行业词 + 品类词」组成的泛称（半导体材料、动力电池、光伏设备…）指的是整个行业，不能当作某家公司的特有产品；
+# 「麒麟电池」「刀片电池」这类具体产品名不受影响
+INDUSTRY_PREFIXES = (
+    "半导体", "集成电路", "光伏", "锂电", "锂电池", "新能源", "储能", "动力", "消费", "汽车", "新能源汽车", "医疗", "光学",
+    "电子", "化工", "通信", "显示", "存储", "算力", "AI", "人工智能", "工业", "电力", "电网", "军工", "航空", "航天",
+    "风电", "核电", "氢能", "光通信", "光模块", "服务器", "数据中心", "机器人", "智能", "数字", "电子化学", "精细化工",
+    "新材料", "高端", "功率", "模拟", "射频", "传感", "封装", "PCB", "LED", "面板", "家电", "白电", "食品", "饮料",
+)
+CATEGORY_SUFFIXES = (
+    "材料", "设备", "电池", "芯片", "器件", "模组", "组件", "服务", "系统", "软件", "平台", "解决方案", "产品", "业务",
+    "零部件", "配件", "装备", "仪器", "整机", "终端", "电源", "化学品", "试剂", "耗材", "板块", "行业", "概念", "产业链",
+)
+
+
+def is_generic_category(term: str) -> bool:
+    t = normalize(term)
+    if t in GENERIC_TERMS:
+        return True
+    return t in CATEGORY_SUFFIXES or any(t.startswith(p) and t[len(p):] in CATEGORY_SUFFIXES for p in INDUSTRY_PREFIXES)
+
+
 # 公司简称本身就是日常用语，只作为弱候选（大模型扩充时还会补充 ambiguous_terms）
 COMMON_WORD_NAMES = {"值得买", "农产品", "中国长城", "长城", "天马", "宝安", "中集", "特发", "华强", "天健", "沙河", "赛格"}
 CODE_RE = re.compile(r"(?<!\d)((?:60|68|00|30)\d{4}|(?:8|4)\d{5}|920\d{3})(?!\d)")
@@ -106,7 +127,7 @@ class CompanyMatcher:
         self.owners = owners
         self._trie: dict = {}
         for term, code, basis in entries:
-            if len(term) < 2 or term in GENERIC_TERMS:
+            if len(term) < 2 or term in GENERIC_TERMS or (basis != "name" and is_generic_category(term)):
                 continue
             strong = (basis == "name" and len(term) >= 3 and len(owners[term]) == 1
                       and term not in ambiguous.get(code, set()))

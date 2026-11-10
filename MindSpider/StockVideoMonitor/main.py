@@ -75,7 +75,12 @@ def cmd_recheck(args) -> None:
     from .report import generate_report
 
     create_tables()
-    recheck(dry_run=args.dry_run)
+    if args.rejudge:
+        from .recheck import rejudge
+
+        rejudge(workers=args.workers, dry_run=args.dry_run)
+    else:
+        recheck(dry_run=args.dry_run)
     if not args.dry_run:
         for p in _platforms():
             generate_report(platform=p)
@@ -222,6 +227,9 @@ def main() -> None:
     sub.add_parser("status", help="查看监控概况").set_defaults(func=cmd_status)
     rc = sub.add_parser("recheck", help="复核已标记作品，去掉作品文字中没有出现的公司（不调用大模型）")
     rc.add_argument("--dry-run", action="store_true", help="只显示会去掉哪些，不修改数据")
+    rc.add_argument("--rejudge", action="store_true",
+                    help="用大模型按新规则（只算主要分析对象）重新判断已标记作品；只用已保存的文字，不访问 TikHub")
+    rc.add_argument("--workers", type=int, default=4)
     rc.set_defaults(func=cmd_recheck)
     why = sub.add_parser("why", help="查看某家公司为什么被挂到作品上（在哪段文字、靠哪个词匹配）")
     why.add_argument("company", help="公司简称或股票代码，例如 欣旺达 或 300207")

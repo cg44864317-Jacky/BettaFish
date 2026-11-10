@@ -39,8 +39,12 @@ JUDGE_SYSTEM = """你是 A 股研究员，判断一条抖音作品（视频或�
 - stance 取值：bullish（看多）、bearish（看空）、neutral（中性/仅介绍）。
 - evidence 摘录原文中的关键句（不超过 60 字）。
 - 「知识库候选」是关键词匹配结果，可能有误，请结合上下文判断；evidence 必须摘自上面的原文。
+- 每家公司标注 role：main（视频实质分析的对象：讨论了它的业务、业绩、估值、股价逻辑等）或
+  mention（只是顺带提到：跟涨/跟跌名单、板块成分股列举、新闻或截图里一笔带过、做对比时提一句）。
+  例如「云南锗业涨停，源杰科技、飞凯材料跟涨」若只分析云南锗业，则源杰科技、飞凯材料为 mention。
+  is_company_analysis 只看 main 公司：没有 main 公司就判为 false。
 只输出 JSON：
-{"is_company_analysis":true,"confidence":0.0,"summary":"一句话概括视频内容","companies":[{"code":"600519","name":"贵州茅台","basis":"name","stance":"bullish","evidence":"..."}]}"""
+{"is_company_analysis":true,"confidence":0.0,"summary":"一句话概括视频内容","companies":[{"code":"600519","name":"贵州茅台","role":"main","basis":"name","stance":"bullish","evidence":"..."}]}"""
 
 
 @dataclass
@@ -127,6 +131,9 @@ class TwoStageClassifier:
         mentions: Dict[str, CompanyMention] = {}
         for c in data.get("companies") or []:
             if not isinstance(c, dict):
+                continue
+            if str(c.get("role") or "main").lower() != "main":  # 只是顺带提到的公司不算分析对象
+                logger.debug(f"[精判] 跳过顺带提到的公司：{c.get('name')}")
                 continue
             resolved = self.matcher.resolve(c.get("code"), c.get("name"))
             if not resolved:
