@@ -70,6 +70,17 @@ def _platforms() -> list:
     return [p for p in dict.fromkeys(x.lower() for x in get_settings().STOCK_VIDEO_PLATFORMS) if p in ("douyin", "wechat")]
 
 
+def cmd_recheck(args) -> None:
+    from .recheck import recheck
+    from .report import generate_report
+
+    create_tables()
+    recheck(dry_run=args.dry_run)
+    if not args.dry_run:
+        for p in _platforms():
+            generate_report(platform=p)
+
+
 def cmd_track(_args) -> None:
     from .alerts import AlertEngine
     from .notifiers import notify
@@ -202,6 +213,9 @@ def main() -> None:
     ac.add_argument("sec_uids", nargs="+")
     ac.set_defaults(func=cmd_add_creator)
     sub.add_parser("status", help="查看监控概况").set_defaults(func=cmd_status)
+    rc = sub.add_parser("recheck", help="复核已标记作品，去掉作品文字中没有出现的公司（不调用大模型）")
+    rc.add_argument("--dry-run", action="store_true", help="只显示会去掉哪些，不修改数据")
+    rc.set_defaults(func=cmd_recheck)
     sub.add_parser("cleanup", help="清理临时文件、浏览器缓存、旧日志和旧数据").set_defaults(func=cmd_cleanup)
     sub.add_parser("douyin-login", help="抖音扫码登录（首次使用或登录失效时运行）").set_defaults(func=cmd_douyin_login)
     st = sub.add_parser("selftest", help="部署自检：数据库、大模型、TikHub、AKShare、内容解析")

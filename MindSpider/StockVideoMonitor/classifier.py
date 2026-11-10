@@ -32,11 +32,13 @@ JUDGE_SYSTEM = """你是 A 股研究员，判断一条抖音作品（视频或�
 公司可以通过名称、简称/外号、股票代码、产品或技术被提及（例如只说「麒麟电池」也可能是在分析宁德时代）。
 判为 false：只谈大盘或板块而不落到具体公司；只是一串股票名单、没有任何分析；纯引流广告；公司只是顺带一提。
 注意：
-- 只输出 A 股（沪深北交易所）上市公司；港股、美股、未上市公司（如华为）不算，但若视频借未上市公司的话题分析其 A 股供应链公司，输出那些 A 股公司。
+- 只输出 A 股（沪深北交易所）上市公司；港股、美股、未上市公司（如华为）不算。
+- 只输出在【标题/文案/话题】【语音文字】【画面文字】中实际出现的公司（出现名称、简称/外号、股票代码，或该公司特有的产品/技术）。
+  不要凭行业知识补充没有出现的同行、竞争对手、上下游或供应链公司；例如视频只讲宁德时代，就不要输出欣旺达、亿纬锂能。
 - basis 取值：name（名称/简称/外号）、code（股票代码）、product（产品）、technology（技术）。
 - stance 取值：bullish（看多）、bearish（看空）、neutral（中性/仅介绍）。
 - evidence 摘录原文中的关键句（不超过 60 字）。
-- 「知识库候选」是关键词匹配结果，可能有误，请结合上下文判断，也可以输出候选之外的公司。
+- 「知识库候选」是关键词匹配结果，可能有误，请结合上下文判断；evidence 必须摘自上面的原文。
 只输出 JSON：
 {"is_company_analysis":true,"confidence":0.0,"summary":"一句话概括视频内容","companies":[{"code":"600519","name":"贵州茅台","basis":"name","stance":"bullish","evidence":"..."}]}"""
 
@@ -131,6 +133,9 @@ class TwoStageClassifier:
                 logger.debug(f"[精判] 丢弃无法在知识库中找到的公司：{c}")
                 continue
             code, name = resolved
+            if not self.matcher.grounded(code, candidates):  # 作品文字里根本没有这家公司，多半是大模型按行业联想补充的
+                logger.info(f"[精判] 丢弃作品中未出现的公司：{code} {name}（大模型给出的依据：{str(c.get('evidence'))[:40]}）")
+                continue
             basis = c.get("basis") if c.get("basis") in ("name", "code", "product", "technology") else None
             if basis is None:
                 bases = candidates.get(code).bases if code in candidates else set()

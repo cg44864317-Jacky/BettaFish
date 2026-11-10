@@ -103,6 +103,7 @@ class CompanyMatcher:
         owners: Dict[str, Set[str]] = {}
         for term, code, _ in entries:
             owners.setdefault(term, set()).add(code)
+        self.owners = owners
         self._trie: dict = {}
         for term, code, basis in entries:
             if len(term) < 2 or term in GENERIC_TERMS:
@@ -138,6 +139,16 @@ class CompanyMatcher:
                 h.terms.add(code)
                 h.strong = True
         return hits
+
+    def grounded(self, code: str, hits: Dict[str, CompanyHit], max_shared: int = 2) -> bool:
+        """这家公司是否真的出现在作品文字里：名称/简称/外号/代码命中，或命中只属于它（最多 max_shared 家共有）的产品/技术/品牌。
+        只靠「动力电池」这类许多公司共有的词命中的，不算出现。"""
+        h = hits.get(code)
+        if not h:
+            return False
+        if h.strong or "code" in h.bases or "name" in h.bases:
+            return True
+        return any(len(self.owners.get(t, ())) <= max_shared for t in h.terms)
 
     def resolve(self, code: Optional[str], name: Optional[str]) -> Optional[Tuple[str, str]]:
         """把大模型给出的代码/名称校正为知识库里真实存在的公司。"""

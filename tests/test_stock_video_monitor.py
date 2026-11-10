@@ -8,7 +8,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "MindSpider"))
@@ -882,3 +882,58 @@ def test_tikhub_retries_failed_keywords_once_more(settings, monkeypatch):
 
     out = th.TikHubSource(client=Client(), settings=settings).search_recent(["股票", "价值投资"])
     assert set(out) == {"股票", "价值投资"} and tries["价值投资"] == 2
+
+
+# ---------------------------------------------------------------------- 公司必须在作品中出现
+def _battery_matcher():
+    def co(code, name, products, aliases=()):
+        return AShareCompany(stock_code=code, name=name, aliases=dumps(list(aliases)), products=dumps(products),
+                             technologies=dumps([]), brands=dumps([]), ambiguous_terms=dumps([]),
+                             manual_locked=False, enriched_at=datetime(2026, 11, 1))
+    return CompanyMatcher([
+        co("300750", "宁德时代", ["麒麟电池", "动力电池", "储能电池"], ["宁王"]),
+        co("300207", "欣旺达", ["动力电池", "消费电池", "储能电池"]),
+        co("300014", "亿纬锂能", ["动力电池", "储能电池", "大圆柱电池"]),
+    ])
+
+
+class PeerAddingLLM:
+    """模拟大模型按行业联想，把没出现的同行也列进来。"""
+
+    def complete_json(self, system, user):
+        return {"is_company_analysis": True, "confidence": 0.85, "summary": "宁德时代财报解读", "companies": [
+            {"code": "300750", "name": "宁德时代", "basis": "name", "stance": "bullish", "evidence": "宁德时代三季报"},
+            {"code": "300207", "name": "欣旺达", "basis": "product", "stance": "neutral", "evidence": "同为动力电池企业"},
+            {"code": "300014", "name": "亿纬锂能", "basis": "product", "stance": "neutral", "evidence": "大圆柱电池"},
+        ]}
+
+
+def test_judge_drops_companies_not_in_video():
+    clf = TwoStageClassifier(_battery_matcher(), PeerAddingLLM())
+    r = clf.judge("宁德时代财报解读和估值更新：三季报动力电池出货大增")
+    # 欣旺达只靠「动力电池」这种三家共有的词命中 → 丢弃；亿纬锂能完全没出现 → 丢弃
+    assert [m.stock_code for m in r.companies] == ["300750"] and r.is_company_analysis
+    r2 = clf.judge("宁德时代和亿纬锂能的大圆柱电池对比")  # 名称或特有产品出现 → 保留
+    assert {m.stock_code for m in r2.companies} == {"300750", "300014"}
+
+
+def test_recheck_removes_ungrounded_links(settings):
+    from StockVideoMonitor.recheck import recheck
+    from StockVideoMonitor.models import DouyinStockVideoCompany
+
+    with mdb.session_scope() as s:
+        for aid, desc in [("v1", "宁德时代财报解读和估值更新"), ("v2", "电池行业周报")]:
+            s.add(DouyinStockVideo(aweme_id=aid, desc=desc, stage="analyzed", is_company_analysis=True,
+                                   is_tracked=True, tracking_status="active", miss_count=0))
+        s.add(DouyinStockVideoCompany(aweme_id="v1", stock_code="300750", stock_name="宁德时代"))
+        s.add(DouyinStockVideoCompany(aweme_id="v1", stock_code="300207", stock_name="欣旺达"))
+        s.add(DouyinStockVideoCompany(aweme_id="v2", stock_code="300207", stock_name="欣旺达"))
+    assert recheck(_battery_matcher(), dry_run=True).removed_links == 2
+    with mdb.session_scope() as s:  # 试运行不改数据
+        assert s.scalar(select(func.count()).select_from(DouyinStockVideoCompany)) == 3
+    st = recheck(_battery_matcher())
+    assert (st.removed_links, st.unflagged) == (2, 1)
+    with mdb.session_scope() as s:
+        assert [c.stock_code for c in s.scalars(select(DouyinStockVideoCompany))] == ["300750"]
+        v2 = s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == "v2"))
+        assert (v2.is_company_analysis, v2.is_tracked, v2.tracking_status) == (False, False, "none")
