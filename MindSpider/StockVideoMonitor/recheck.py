@@ -66,3 +66,40 @@ def recheck(matcher: CompanyMatcher = None, dry_run: bool = False) -> RecheckSta
     for title, comp, platform in stats.examples:
         logger.info(f"[复核]   {'视频号' if platform == 'wechat' else '抖音'}「{title}」去掉 {comp}")
     return stats
+
+
+FIELD_CN = (("title", "标题"), ("desc", "文案"), ("hashtags", "话题"), ("asr_text", "语音文字"), ("ocr_text", "画面文字"))
+
+
+def explain(company: str, matcher: CompanyMatcher = None, limit: int = 10) -> int:
+    """显示某家公司被挂到哪些作品上，以及它是在哪段文字里、靠哪个词匹配上的。"""
+    from .knowledge_base import normalize
+
+    matcher = matcher or load_matcher()
+    with session_scope() as s:
+        q = select(DouyinStockVideoCompany).where(
+            (DouyinStockVideoCompany.stock_name == company) | (DouyinStockVideoCompany.stock_code == company))
+        links = list(s.scalars(q.order_by(DouyinStockVideoCompany.id.desc()).limit(limit)))
+        print(f"「{company}」挂在 {len(links)} 条作品上（最多显示 {limit} 条）")
+        for m in links:
+            v = s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == m.aweme_id))
+            if not v:
+                continue
+            print(f"\n■ {'视频号' if v.platform == 'wechat' else '抖音'}「{(v.title or v.desc or '')[:40]}」 {v.aweme_url or ''}")
+            print(f"  大模型给出的依据：{m.basis}；原文证据：{(m.evidence or '')[:60]}")
+            found = False
+            for attr, label in FIELD_CN:
+                raw = getattr(v, attr) or ""
+                text = " ".join(loads_list(raw)) if attr == "hashtags" else raw
+                hit = matcher.match(text).get(m.stock_code)
+                if not hit:
+                    continue
+                found = True
+                t = normalize(text)
+                for term in sorted(hit.terms):
+                    i = t.find(term)
+                    ctx = t[max(0, i - 20): i + len(term) + 20].replace("\n", " ") if i >= 0 else ""
+                    print(f"  {label}里匹配到「{term}」（{len(matcher.owners.get(term, ()))} 家公司共有此词）：…{ctx}…")
+            if not found:
+                print("  作品文字里找不到这家公司（运行 recheck 会去掉）")
+    return len(links)

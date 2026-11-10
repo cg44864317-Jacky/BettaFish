@@ -937,3 +937,16 @@ def test_recheck_removes_ungrounded_links(settings):
         assert [c.stock_code for c in s.scalars(select(DouyinStockVideoCompany))] == ["300750"]
         v2 = s.scalar(select(DouyinStockVideo).where(DouyinStockVideo.aweme_id == "v2"))
         assert (v2.is_company_analysis, v2.is_tracked, v2.tracking_status) == (False, False, "none")
+
+
+def test_explain_shows_where_company_matched(settings, capsys):
+    from StockVideoMonitor.recheck import explain
+    from StockVideoMonitor.models import DouyinStockVideoCompany
+
+    with mdb.session_scope() as s:
+        s.add(DouyinStockVideo(aweme_id="v1", desc="宁德时代财报解读", ocr_text="自选股 欣旺达 +2.1% 亿纬锂能 -0.5%",
+                               stage="analyzed", is_company_analysis=True, is_tracked=True, tracking_status="active", miss_count=0))
+        s.add(DouyinStockVideoCompany(aweme_id="v1", stock_code="300207", stock_name="欣旺达", basis="name"))
+    assert explain("欣旺达", _battery_matcher()) == 1
+    out = capsys.readouterr().out
+    assert "画面文字里匹配到「欣旺达」" in out and "自选股" in out

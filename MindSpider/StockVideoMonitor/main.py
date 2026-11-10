@@ -81,6 +81,13 @@ def cmd_recheck(args) -> None:
             generate_report(platform=p)
 
 
+def cmd_why(args) -> None:
+    from .recheck import explain
+
+    create_tables()
+    explain(args.company, limit=args.limit)
+
+
 def cmd_track(_args) -> None:
     from .alerts import AlertEngine
     from .notifiers import notify
@@ -216,6 +223,10 @@ def main() -> None:
     rc = sub.add_parser("recheck", help="复核已标记作品，去掉作品文字中没有出现的公司（不调用大模型）")
     rc.add_argument("--dry-run", action="store_true", help="只显示会去掉哪些，不修改数据")
     rc.set_defaults(func=cmd_recheck)
+    why = sub.add_parser("why", help="查看某家公司为什么被挂到作品上（在哪段文字、靠哪个词匹配）")
+    why.add_argument("company", help="公司简称或股票代码，例如 欣旺达 或 300207")
+    why.add_argument("--limit", type=int, default=10)
+    why.set_defaults(func=cmd_why)
     sub.add_parser("cleanup", help="清理临时文件、浏览器缓存、旧日志和旧数据").set_defaults(func=cmd_cleanup)
     sub.add_parser("douyin-login", help="抖音扫码登录（首次使用或登录失效时运行）").set_defaults(func=cmd_douyin_login)
     st = sub.add_parser("selftest", help="部署自检：数据库、大模型、TikHub、AKShare、内容解析")
