@@ -65,6 +65,15 @@ def run_daily(now: Optional[datetime] = None, settings: Optional[MonitorSettings
         summary[f"tracking_{p}"] = asdict(tstats)
         unavailable[p] = tstats.unavailable_ids
 
+    # 跟踪完先出一版跟踪表：万一后面的识别被中断，当天也有最新的互动数据；全部结束后会再更新一次
+    from .report import generate_report
+
+    for p in platforms:
+        try:
+            generate_report(now.date(), platform=p)
+        except Exception as e:
+            logger.warning(f"[跟踪表·{PLATFORM_CN[p]}] 预生成失败：{e}")
+
     # 再发现：视频号只识别文案和封面，很快，先做；抖音要下载解析视频，耗时长，放在后面
     if not skip_discovery:
         matcher = llm = None
@@ -78,8 +87,6 @@ def run_daily(now: Optional[datetime] = None, settings: Optional[MonitorSettings
             source = build_discovery(s) if p == "douyin" else trackers[p]
             disc = DailyDiscovery(source, classifier, MediaAnalyzer(s), trackers[p], s, platform=p)
             summary[f"discovery_{p}"] = asdict(disc.run(now, hard_deadline))
-
-    from .report import generate_report
 
     for p in platforms:
         engine = AlertEngine(s, platform=p)
